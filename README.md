@@ -1,6 +1,6 @@
 # memecheck
 
-![tests](https://github.com/Guannings/memecheck/actions/workflows/tests.yml/badge.svg)
+![tests](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml/badge.svg)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -66,8 +66,8 @@ Requirements: **Python 3.9 or newer**. No third-party runtime dependencies — i
 only uses the standard library.
 
 ```bash
-git clone <your fork or this repo>
-cd memecheck
+git clone https://github.com/Guannings/on-chain-risk-screener.git
+cd on-chain-risk-screener
 python3 memecheck.py <TOKEN_ADDRESS>
 ```
 
