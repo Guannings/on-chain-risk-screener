@@ -322,6 +322,35 @@ def analyze_rugcheck(rep: dict[str, Any]) -> tuple[list[str], list[str], dict[st
     return flags, notes, metrics
 
 
+def _classify_honeypot_error(hp: dict[str, Any]) -> str:
+    """Classify why honeypot.is gave us no usable answer.
+
+    Returns a short human-readable label. The raw upstream message is
+    inspected for known signals (HTTP 429, 5xx, timeout, missing pair,
+    API-body `error` field) and bucketed into one of five categories;
+    anything else falls through to a truncated copy of the raw message.
+    """
+    if not hp:
+        return "no response"
+    raw = hp.get("_error") or hp.get("error") or ""
+    s = str(raw).lower()
+    if "http 429" in s or "rate" in s:
+        return "rate-limited (try again in a minute)"
+    if "timeout" in s:
+        return "request timed out"
+    if "http 5" in s:
+        return "service error (honeypot.is returned 5xx)"
+    if "pair" in s and "not" in s:
+        return "no liquidity pair found"
+    if "http 4" in s:
+        # 400/404 from this endpoint usually means: unsupported chain,
+        # no LP for the token, or the token isn't indexed yet.
+        return "no liquidity pair found, or token not indexed yet"
+    if raw:
+        return str(raw)[:120]
+    return "unknown error"
+
+
 def analyze_honeypot(hp: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
     flags: list[str] = []
     notes: list[str] = []
@@ -331,10 +360,15 @@ def analyze_honeypot(hp: dict[str, Any]) -> tuple[list[str], list[str], dict[str
         "sell_tax_pct": None,
         "open_source": None,
         "available": True,
+        "error_reason": None,
     }
-    if not hp or "_error" in hp:
-        notes.append("honeypot.is: unavailable.")
+    # A valid honeypot.is response always carries `honeypotResult`. Anything
+    # missing it is treated as unavailable and we classify why.
+    if not hp or "_error" in hp or "honeypotResult" not in hp:
+        reason = _classify_honeypot_error(hp or {})
+        notes.append(f"honeypot.is: unavailable ({reason}).")
         metrics["available"] = False
+        metrics["error_reason"] = reason
         return flags, notes, metrics
 
     hr = hp.get("honeypotResult") or {}
