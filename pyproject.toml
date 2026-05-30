@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memecheck"
+version = "0.1.0"
+description = "On-chain risk screener: DexScreener + RugCheck (Solana) + honeypot.is (EVM). Zero runtime dependencies."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["defi", "solana", "evm", "rugcheck", "honeypot", "dexscreener", "risk"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Topic :: Office/Business :: Financial",
+]
+# Runtime dependencies: NONE — stdlib only. This is intentional.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+memecheck = "memecheck:main"
+
+[tool.setuptools]
+py-modules = ["memecheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
