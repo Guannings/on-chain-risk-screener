@@ -1,19 +1,58 @@
 # memecheck
 
-![tests](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml/badge.svg)
+[![tests](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml/badge.svg)](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![dependencies](https://img.shields.io/badge/runtime%20deps-0-success)
 ![license](https://img.shields.io/badge/license-MIT-green)
+![last commit](https://img.shields.io/github/last-commit/Guannings/on-chain-risk-screener)
 
-A single-file, zero-dependency on-chain **risk screener** for ERC-20 and SPL
-tokens. Point it at a contract address and it pulls live data from three public
-sources, scores them against a documented set of red-flag thresholds, and prints
-either a human-readable report or structured JSON.
+> **Catch the rug before it pulls.** A zero-dependency Python CLI that screens
+> any Solana or EVM token in under three seconds by aggregating three live
+> public sources — DexScreener, RugCheck, and honeypot.is — into a deterministic
+> red-flag verdict.
 
-> This is a screening tool, not a trading signal. It surfaces the mechanical
-> failure modes of a token — rug pulls, honeypots, dead liquidity, insider
-> concentration — that a buyer can verify before sending funds. It does not
-> predict price. **It is not financial advice.** See the disclaimer at the
-> bottom.
+<p align="center">
+  <img src="assets/architecture.svg" alt="memecheck architecture: one token address fans out to DexScreener, RugCheck, and honeypot.is, then into a threshold analyzer that emits flags, a verdict, and an exit code." width="780">
+</p>
+
+## Quickstart
+
+```bash
+git clone https://github.com/Guannings/on-chain-risk-screener.git
+cd on-chain-risk-screener
+python3 memecheck.py <TOKEN_ADDRESS>
+```
+
+Or install it as a proper CLI:
+
+```bash
+pip install .
+memecheck <TOKEN_ADDRESS>
+```
+
+Requires Python 3.9+. **No third-party runtime dependencies** — stdlib only.
+
+## Try it on these
+
+The tool auto-detects chain from the address format. Copy-paste any of these to see real output now:
+
+| Token | Address | What you'll see |
+|---|---|---|
+| $WIF (Solana) | `EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm` | Solana path — DexScreener + RugCheck, flags a concentration risk |
+| PEPE (Ethereum) | `0x6982508145454Ce325dDbE47a25d4ec3d2311933` | EVM path — DexScreener + honeypot.is, clean contract |
+| USDC (Solana mint) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Stable reference — clean contract, zero relevant flags |
+
+```bash
+memecheck EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm
+memecheck 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --chain ethereum
+memecheck 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --json | jq '.verdict'
+```
+
+> [!IMPORTANT]
+> This is a screening tool, not a trading signal. It surfaces mechanical
+> failure modes — rug pulls, honeypots, dead liquidity, insider concentration —
+> that a buyer can verify before sending funds. It does **not** predict price.
+> **It is not financial advice.** See the full disclaimer at the bottom.
 
 ## What it checks and why each check matters
 
@@ -60,25 +99,7 @@ liquidity is never summed across different deployments of the same address.
   DexScreener checks; the honeypot check defaults to Ethereum if the chain is
   unrecognised. Force the chain explicitly with `--chain` (see below).
 
-## Install and run
-
-Requirements: **Python 3.9 or newer**. No third-party runtime dependencies — it
-only uses the standard library.
-
-```bash
-git clone https://github.com/Guannings/on-chain-risk-screener.git
-cd on-chain-risk-screener
-python3 memecheck.py <TOKEN_ADDRESS>
-```
-
-You can also install it as a CLI:
-
-```bash
-pip install .
-memecheck <TOKEN_ADDRESS>
-```
-
-### Flags
+## Flags
 
 ```
 memecheck <ADDRESS>                        # auto-detect chain, human-readable

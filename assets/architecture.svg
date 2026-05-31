@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 360" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill: #ffffff; stroke: #1f2937; stroke-width: 1.6; }
+    .accent { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; }
+    .verdict { fill: #f0fdf4; stroke: #15803d; stroke-width: 1.8; }
+    .label { fill: #111827; font-size: 14px; font-weight: 600; }
+    .sub   { fill: #4b5563; font-size: 11.5px; font-weight: 400; }
+    .arrow { stroke: #4b5563; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+    .arrow-thick { stroke: #2563eb; stroke-width: 1.8; fill: none; marker-end: url(#arrow-blue); }
+    .meta { fill: #6b7280; font-size: 12px; font-style: italic; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5563"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <!-- Input: token address -->
+  <rect class="accent" x="350" y="20" width="180" height="56" rx="10"/>
+  <text class="label" x="440" y="44" text-anchor="middle">Token address</text>
+  <text class="sub"   x="440" y="62" text-anchor="middle">0x… or base58 mint</text>
+
+  <!-- Detect chain box -->
+  <rect class="box" x="350" y="108" width="180" height="44" rx="10"/>
+  <text class="label" x="440" y="135" text-anchor="middle">Auto-detect chain</text>
+
+  <!-- Arrows down -->
+  <line class="arrow-thick" x1="440" y1="76" x2="440" y2="106"/>
+
+  <!-- Three source boxes -->
+  <!-- DexScreener -->
+  <rect class="box" x="40" y="190" width="220" height="92" rx="10"/>
+  <text class="label" x="150" y="216" text-anchor="middle">DexScreener</text>
+  <text class="sub"   x="150" y="236" text-anchor="middle">all chains</text>
+  <text class="sub"   x="150" y="254" text-anchor="middle">liquidity · MC / FDV · 24h vol</text>
+  <text class="sub"   x="150" y="270" text-anchor="middle">age · buy/sell flow · aggregated</text>
+
+  <!-- RugCheck -->
+  <rect class="box" x="330" y="190" width="220" height="92" rx="10"/>
+  <text class="label" x="440" y="216" text-anchor="middle">RugCheck</text>
+  <text class="sub"   x="440" y="236" text-anchor="middle">Solana only</text>
+  <text class="sub"   x="440" y="254" text-anchor="middle">mint / freeze authority · LP locked</text>
+  <text class="sub"   x="440" y="270" text-anchor="middle">top-10 concentration · risks[]</text>
+
+  <!-- honeypot.is -->
+  <rect class="box" x="620" y="190" width="220" height="92" rx="10"/>
+  <text class="label" x="730" y="216" text-anchor="middle">honeypot.is</text>
+  <text class="sub"   x="730" y="236" text-anchor="middle">EVM chains</text>
+  <text class="sub"   x="730" y="254" text-anchor="middle">buy/sell simulation · taxes</text>
+  <text class="sub"   x="730" y="270" text-anchor="middle">open-source check</text>
+
+  <!-- Arrows from detect to sources -->
+  <path class="arrow" d="M 400 152 C 380 170 250 170 150 188"/>
+  <line class="arrow" x1="440" y1="152" x2="440" y2="188"/>
+  <path class="arrow" d="M 480 152 C 500 170 630 170 730 188"/>
+
+  <!-- Analyzer -->
+  <rect class="box" x="290" y="304" width="300" height="44" rx="10"/>
+  <text class="label" x="440" y="324" text-anchor="middle">Threshold analyzer</text>
+  <text class="sub"   x="440" y="340" text-anchor="middle">named constants · zero dependencies</text>
+
+  <!-- Arrows from sources to analyzer -->
+  <path class="arrow" d="M 150 282 C 200 300 280 300 340 302"/>
+  <line class="arrow" x1="440" y1="282" x2="440" y2="302"/>
+  <path class="arrow" d="M 730 282 C 680 300 600 300 540 302"/>
+
+  <!-- Output annotations on the right -->
+  <rect class="verdict" x="680" y="20" width="160" height="56" rx="10"/>
+  <text class="label" x="760" y="44" text-anchor="middle">Verdict + flags</text>
+  <text class="sub"   x="760" y="62" text-anchor="middle">text · JSON · exit code</text>
+
+  <path class="arrow-thick" d="M 590 326 C 720 326 760 160 760 80"/>
+
+  <text class="meta" x="440" y="14" text-anchor="middle"></text>
+</svg>
