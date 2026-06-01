@@ -76,11 +76,18 @@ class MonitorState:
     def windowed_delta_pct(self, window_seconds: float) -> Optional[float]:
         """ΔL_W as a percentage. None if buffer doesn't span the window.
 
-        Picks the OLDEST event whose ts is >= (now - W) — i.e. the earliest
-        sample still inside the lookback window. Reflects the strict
-        question 'in the last W seconds, how much did liquidity move?'.
+        Strict semantics: returns None unless the buffer holds at least
+        `window_seconds` of history. This prevents the decision engine
+        from firing on a "60s delta" computed from 10s of observations.
+        Once the buffer is wide enough, picks the OLDEST event whose ts
+        is >= (now - W) — i.e. the earliest sample still inside the
+        lookback window.
         """
-        if self.current is None:
+        if self.current is None or len(self._events) < 2:
+            return None
+        # Require enough history to honestly evaluate this window.
+        span = self.current.ts - self._events[0].ts
+        if span < window_seconds:
             return None
         now_ts = self.current.ts
         cutoff = now_ts - window_seconds

@@ -123,10 +123,10 @@ def test_windowed_delta_multiple_windows() -> None:
     d60 = s.windowed_delta_pct(60)
     assert d60 is not None
     assert math.isclose(d60, -12.5, rel_tol=1e-6)
-    # 200s window: cutoff = -20, oldest = t=0 (liq=1000) → -30%
-    d200 = s.windowed_delta_pct(200)
-    assert d200 is not None
-    assert math.isclose(d200, -30.0, rel_tol=1e-6)
+    # 200s window: span = 180s < 200s, so strict semantics return None.
+    # We do not have enough history to honestly answer "what changed over
+    # the last 200 seconds?"
+    assert s.windowed_delta_pct(200) is None
 
 
 # ----------------------------- ring buffer eviction ----------------------

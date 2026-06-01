@@ -87,6 +87,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-ticks", type=int, default=None, dest="max_ticks",
         help="stop after this many ticks (default: run until Ctrl+C)",
     )
+    watch.add_argument(
+        "--no-audit", dest="no_audit", action="store_true",
+        help="disable the JSONL audit log",
+    )
+    watch.add_argument(
+        "--audit-dir", dest="audit_dir", default=None,
+        help="directory for the audit log (default ./audit)",
+    )
 
     # ---- calc ------------------------------------------------------------
     calc = sub.add_parser(
@@ -140,12 +148,16 @@ def _run_scan(args: argparse.Namespace) -> int:
 
 def _run_watch(args: argparse.Namespace) -> int:
     # Lazy import: only pull in the async machinery when actually watching.
+    from pathlib import Path
     from memecheck.monitor.runner import run_watch_cli
+    audit_dir = Path(args.audit_dir) if args.audit_dir else None
     return run_watch_cli(
         address=args.address.strip(),
         forced_chain=args.chain,
         interval=args.interval,
         max_ticks=args.max_ticks,
+        audit_enabled=not args.no_audit,
+        audit_dir=audit_dir,
     )
 
 

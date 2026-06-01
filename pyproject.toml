@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memecheck"
-version = "0.3.0"
-description = "On-chain risk screener + real-time monitor: DexScreener + RugCheck (Solana) + honeypot.is (EVM). Zero runtime dependencies."
+version = "0.4.0"
+description = "On-chain risk screener + real-time monitor with decision engine + alert channels: DexScreener + RugCheck (Solana) + honeypot.is (EVM). Zero runtime dependencies."
 requires-python = ">=3.9"
 license = { text = "MIT" }
 readme = "README.md"
@@ -31,7 +31,13 @@ dev = ["pytest>=7"]
 memecheck = "memecheck.cli:main"
 
 [tool.setuptools]
-packages = ["memecheck", "memecheck.common", "memecheck.scanner", "memecheck.monitor"]
+packages = [
+  "memecheck",
+  "memecheck.common",
+  "memecheck.scanner",
+  "memecheck.monitor",
+  "memecheck.monitor.action",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
