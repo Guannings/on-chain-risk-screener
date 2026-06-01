@@ -169,20 +169,83 @@ def _run_calc(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_menu() -> None:
+    # Apply bold only when stdout is a real terminal (skip when piped to file).
+    if sys.stdout.isatty():
+        b, r = "\033[1m", "\033[0m"
+    else:
+        b = r = ""
+    menu = f"""\
+memecheck — on-chain risk screener for memecoins
+─────────────────────────────────────────────────
+
+WHAT IT DOES
+  Saves you from buying tokens that can't be exited, and warns you
+  while you hold one that the pool is bleeding. Three lifecycles:
+
+  {b}scan <ADDRESS>{r}       BEFORE you buy.
+       Pulls live data from DexScreener + RugCheck (Solana)
+       + honeypot.is (EVM). Prints a red-flag list and a verdict.
+       Add --buy-size <USD> to also simulate the price impact of
+       your intended buy.
+
+       Example:
+         memecheck scan EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm --buy-size 50
+
+  {b}watch <ADDRESS>{r}      AFTER you buy, while you're holding.
+       Polls the deepest pool every few seconds, tracks rolling
+       liquidity deltas (10s / 60s / 5min), alerts on rugs and
+       slow bleeds. Optional push to Telegram / Discord / ntfy
+       via env vars. Press Ctrl+C to stop.
+
+       Example:
+         memecheck watch 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --chain ethereum
+
+  {b}calc --liq P --lev L{r}  Liquidation-price calculator for
+       leveraged positions. No network, no token lookup.
+
+       Example:
+         memecheck calc --liq 0.0001 --lev 10
+
+WHAT IT IS NOT
+  - Not financial advice.
+  - Not a trading bot — it does not sign or send transactions.
+  - Not a price predictor — it catches rugs, not bad bets.
+
+MORE
+  Full flags per subcommand:
+    memecheck scan --help
+    memecheck watch --help
+    memecheck calc --help
+
+  Project + source:
+    https://github.com/Guannings/on-chain-risk-screener
+"""
+    sys.stdout.write(menu)
+    sys.stdout.flush()
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     if sys.version_info < (3, 9):
         sys.stderr.write("memecheck requires Python 3.9 or newer.\n")
         sys.exit(1)
 
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
+    # Bare invocation (no args) shows the friendly menu, not the dry
+    # argparse usage. --help still routes to argparse for power users.
+    if not raw_argv:
+        _print_menu()
+        sys.exit(0)
+
     raw_argv = _prepend_implicit_subcommand(raw_argv)
 
     parser = _build_parser()
     args = parser.parse_args(raw_argv)
 
     if args.cmd is None:
-        parser.print_help()
-        sys.exit(1)
+        _print_menu()
+        sys.exit(0)
 
     if args.cmd == "scan":
         sys.exit(_run_scan(args))
@@ -191,8 +254,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     elif args.cmd == "calc":
         sys.exit(_run_calc(args))
     else:
-        parser.print_help()
-        sys.exit(1)
+        _print_menu()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
