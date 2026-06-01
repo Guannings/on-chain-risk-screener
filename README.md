@@ -430,12 +430,27 @@ threshold config later.
 ```
 ########## memecheck watch — $WIF/SOL on solana via raydium (EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx) ##########
 alert channels: console
-audit log: /Users/cesaregundels/Crypto/audit/solana-EKpQGSJt-zcjm-20260601T154208Z.jsonl
-  tick   liq         price        vs L0    10s     60s     5m     action
-[tick    1] liq    $4.69M  px $0.1835  vs L0  +0.00%  10s   n/a  60s   n/a  5m   n/a  [NONE]
-[tick    2] liq    $4.69M  px $0.1835  vs L0  +0.00%  10s  +0.00%  60s   n/a  5m   n/a  [NONE]
-[tick    3] liq    $4.69M  px $0.1834  vs L0  -0.01%  10s  -0.01%  60s   n/a  5m   n/a  [NONE]
+audit log: ./audit/solana-EKpQGSJt-zcjm-20260601T154208Z.jsonl
+
+    # │      liq │      price │   vs L0 │   Δ 10s │   Δ 60s │    Δ 5m
+─────┼──────────┼────────────┼─────────┼─────────┼─────────┼─────────
+    1 │   $4.73M │  $0.187000 │  +0.00% │    ·    │    ·    │    ·
+    2 │   $4.73M │  $0.187000 │  +0.00% │  +0.00% │    ·    │    ·
+    3 │   $4.72M │  $0.186900 │  -0.01% │  -0.01% │    ·    │    ·
+    4 │   $4.71M │  $0.186200 │  -0.40% │  -0.40% │  -0.40% │    ·
+      ⚠ ALERT  Slow bleed: ΔL_60s=-0.4%, ΔL_300s=-0.4%
 ```
+
+Rules of thumb when reading it:
+
+- `·` means the rolling window hasn't filled yet — wait `W` seconds and the
+  number appears.
+- `[NONE]` rows have **no action text**. When `ALERT` or `EXECUTE` fires,
+  it shows up as a coloured callout indented under the data row (yellow ⚠
+  for ALERT, red ⛔ for EXECUTE) so it actually stands out instead of
+  drowning in a column of "NONE"s.
+- The data row keeps printing every tick so you can confirm the tool is
+  still alive and the deltas are still where you'd expect.
 
 ### Where to run it
 

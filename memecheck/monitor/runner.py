@@ -58,25 +58,44 @@ class RunStats:
 
 
 def _fmt_delta(p: Optional[float]) -> str:
-    return "  n/a" if p is None else f"{p:+6.2f}%"
+    """7-char wide: '+12.34%', '-12.34%', or a centered '·' for not-covered."""
+    if p is None:
+        return "   ·   "
+    return f"{p:+6.2f}%"
+
+
+def _fmt_price(x: float) -> str:
+    """Adaptive price format — bare string, no padding."""
+    if x == 0:
+        return "$0"
+    if x >= 1000:
+        return f"${x:,.2f}"            # $67,234.12
+    if x >= 1:
+        return f"${x:.4f}"             # $791.5500
+    if x >= 0.01:
+        return f"${x:.6f}"             # $0.014523
+    return f"${x:.4g}"                 # $1.234e-05
 
 
 def _print_tick(tick: int, ev: LiquidityEvent, dec: Decision) -> None:
-    tag = dec.action
-    if tag == ACTION_EXECUTE:
-        tag = "\033[1;31mEXECUTE\033[0m"  # bold red
-    elif tag == ACTION_ALERT:
-        tag = "\033[1;33mALERT\033[0m"  # bold yellow
+    """One clean data row. Action label is suppressed for NONE — see _print_alert."""
     print(
-        f"[tick {tick:>4d}] "
-        f"liq {fmt_usd(ev.liquidity_usd):>9s}  "
-        f"px ${ev.price_usd:.8g}  "
-        f"vs L0 {_fmt_delta(dec.metrics.get('delta_vs_baseline_pct'))}  "
-        f"10s {_fmt_delta(dec.metrics.get('delta_10s_pct'))}  "
-        f"60s {_fmt_delta(dec.metrics.get('delta_60s_pct'))}  "
-        f"5m {_fmt_delta(dec.metrics.get('delta_300s_pct'))}  "
-        f"[{tag}]"
+        f" {tick:>4d} │"
+        f" {fmt_usd(ev.liquidity_usd):>8s} │"
+        f" {_fmt_price(ev.price_usd):>10s} │"
+        f" {_fmt_delta(dec.metrics.get('delta_vs_baseline_pct'))} │"
+        f" {_fmt_delta(dec.metrics.get('delta_10s_pct'))} │"
+        f" {_fmt_delta(dec.metrics.get('delta_60s_pct'))} │"
+        f" {_fmt_delta(dec.metrics.get('delta_300s_pct'))}"
     )
+    if dec.action == ACTION_ALERT:
+        sys.stdout.write(
+            f"      \033[1;33m⚠ ALERT\033[0m  {dec.reason or ''}\n"
+        )
+    elif dec.action == ACTION_EXECUTE:
+        sys.stdout.write(
+            f"      \033[1;31m⛔ EXECUTE\033[0m  {dec.reason or ''}\n"
+        )
 
 
 async def run_monitor(
@@ -164,7 +183,21 @@ def _print_header(pool_repr: str, channel_names: list[str], audit_path: Optional
     print(f"alert channels: {', '.join(channel_names) if channel_names else '(none)'}")
     if audit_path is not None:
         print(f"audit log: {audit_path}")
-    print("  tick   liq         price        vs L0    10s     60s     5m     action")
+    print()  # blank line before the table
+    # Widths match _print_tick exactly:  4 / 8 / 10 / 7 / 7 / 7 / 7
+    print(
+        f" {'#':>4s} │"
+        f" {'liq':>8s} │"
+        f" {'price':>10s} │"
+        f" {'vs L0':>7s} │"
+        f" {'Δ 10s':>7s} │"
+        f" {'Δ 60s':>7s} │"
+        f" {'Δ 5m':>7s}"
+    )
+    # Header rule.  ─ between columns, ┼ at the junctions.
+    print(
+        "─────┼──────────┼────────────┼─────────┼─────────┼─────────┼─────────"
+    )
 
 
 def run_watch_cli(
