@@ -20,7 +20,7 @@
 ```bash
 git clone https://github.com/Guannings/on-chain-risk-screener.git
 cd on-chain-risk-screener
-python3 memecheck.py <TOKEN_ADDRESS>
+python3 -m memecheck <TOKEN_ADDRESS>
 ```
 
 Or install it as a proper CLI:
@@ -31,6 +31,10 @@ memecheck <TOKEN_ADDRESS>
 ```
 
 Requires Python 3.9+. **No third-party runtime dependencies** — stdlib only.
+
+Want to know what your buy size would *actually* cost? Add `--buy-size <USD>` to
+simulate the price impact before sending the trade. See the
+[Exit-liquidity simulator](#exit-liquidity-simulator) section below.
 
 ## Try it on these
 
@@ -223,6 +227,76 @@ metrics, and the verdict — suitable for piping into other tools:
   "verdict": "RISKY — proceed only with money already written off"
 }
 ```
+
+## Exit-liquidity simulator
+
+The displayed price on a DEX is the *marginal* price of swapping one
+infinitesimal unit. The price you actually pay on a real trade is determined
+by the constant-product math against finite pool reserves. On thin pools, even
+small buys walk the curve hard and the price you pay is meaningfully above
+what the chart shows.
+
+Pass `--buy-size <USD>` to simulate that explicitly:
+
+```bash
+memecheck <TOKEN_ADDRESS> --buy-size 100
+memecheck <TOKEN_ADDRESS> --buy-size 25 --max-slippage 3
+```
+
+What it computes, for a constant-product AMM with reserves $(R_q, R_b)$ and
+fee $f$ basis points:
+
+$$\text{displayed price} = \frac{R_q}{R_b} \cdot P_q^\text{USD}$$
+
+$$\Delta_b = \frac{R_b \cdot X(1 - f/10{,}000)}{R_q + X(1 - f/10{,}000)} \quad\quad \text{effective price} = \frac{X \cdot P_q^\text{USD}}{\Delta_b}$$
+
+$$\text{price impact} = \frac{\text{effective}}{\text{displayed}} - 1$$
+
+Where $X$ is your buy size in quote tokens and $\Delta_b$ is the number of base
+tokens you actually receive.
+
+The simulator reports two metrics:
+
+| Metric | What it tells you |
+|---|---|
+| **Price impact** | How much higher than the displayed price you actually pay. This is the warning signal — scales with your trade size relative to pool depth. Flag at 5%, severe at 20%. |
+| **Round-trip slippage** | What you'd lose buying then immediately selling. Reported as a sanity check, but capped by ~2 × fee on V2-style AMMs regardless of trade size — the fee stays in the pool. Not a useful measure of "stuck bag" risk. |
+
+It also binary-searches the **max safe buy size** that keeps price impact under
+your `--max-slippage` target (default 5%).
+
+Sample output, $100 buy on a deep pool (WIF):
+
+```
+--- Exit-liquidity simulator ---
+  Exit-liquidity simulator (buy size: $100.00, fee 25 bps)
+    Pool quote-side depth: $2.36M
+    Displayed price:     $0.1849103164
+    Effective buy price: $0.1853815925  (price impact +0.3%)
+    Immediate round-trip: 0.50% loss  (would get back $99.50)
+    To stay under 5.0% PRICE IMPACT, buy ≤ $111.99K.
+```
+
+On a thin pool (~$100 quote-side depth) buying $10, the same metric
+would read "price impact +11%" — a clear warning before you send the trade.
+
+This is the check that would have caught the "I bought a 6000%-pumped memecoin
+for $10 and now the unrealised P&L stays unrealised forever" failure mode.
+That P&L was never realisable because the buy itself moved the marginal
+price massively, and the pool can't absorb a sell of the resulting bag at
+the displayed peak.
+
+### Caveats
+
+- The math assumes a **constant-product (V2-style) AMM**. Concentrated-liquidity
+  pools (Uniswap V3, Orca Whirlpool, Meteora DLMM) are treated as if they were
+  V2 — this *underestimates* impact when the trade crosses ticks, so the
+  verdict errs conservatively in the right direction.
+- The simulator runs on the **deepest single pool**, not the aggregated route
+  a real swap would take. Real routers (Jupiter on Solana, 1inch on EVM) split
+  trades across pools and do better than this estimate.
+- It does **not** account for MEV, sandwich attacks, or the pool's state
+  changing between the time you check and the time you trade.
 
 ## Liquidation-price calculator
 
