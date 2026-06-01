@@ -20,21 +20,30 @@
 ```bash
 git clone https://github.com/Guannings/on-chain-risk-screener.git
 cd on-chain-risk-screener
-python3 -m memecheck <TOKEN_ADDRESS>
+pip install .
 ```
 
-Or install it as a proper CLI:
+Then either of the two lifecycles:
 
 ```bash
-pip install .
-memecheck <TOKEN_ADDRESS>
+# Pre-trade: a one-shot risk screen.
+memecheck scan <TOKEN_ADDRESS>
+memecheck scan <TOKEN_ADDRESS> --buy-size 50    # add an exit-liquidity sim
+
+# Post-trade: a real-time monitor on the deepest pool.
+memecheck watch <TOKEN_ADDRESS>
+```
+
+If you'd rather not `pip install`, both of these work without it:
+
+```bash
+python3 -m memecheck scan <TOKEN_ADDRESS>
+python3 memecheck.py scan <TOKEN_ADDRESS>       # legacy invocation, still works
 ```
 
 Requires Python 3.9+. **No third-party runtime dependencies** — stdlib only.
 
-Want to know what your buy size would *actually* cost? Add `--buy-size <USD>` to
-simulate the price impact before sending the trade. See the
-[Exit-liquidity simulator](#exit-liquidity-simulator) section below.
+See the [full command reference](#command-reference) for every flag.
 
 ## Try it on these
 
@@ -103,23 +112,72 @@ liquidity is never summed across different deployments of the same address.
   DexScreener checks; the honeypot check defaults to Ethereum if the chain is
   unrecognised. Force the chain explicitly with `--chain` (see below).
 
-## Flags
+## Command reference
 
-```
-memecheck <ADDRESS>                        # auto-detect chain, human-readable
-memecheck <ADDRESS> --chain base           # force EVM chain for honeypot check
-memecheck <ADDRESS> --json                 # structured output
-memecheck --liq 0.0000123 --lev 10         # liquidation-price calculator only
-memecheck <ADDRESS> --liq 0.0123 --lev 5   # screen + liquidation calc
+Three subcommands. Everything else is a flag.
+
+### `scan` — one-shot pre-trade check
+
+```bash
+memecheck scan <ADDRESS>                            # auto-detect chain
+memecheck scan <ADDRESS> --chain ethereum           # force EVM chain
+memecheck scan <ADDRESS> --buy-size 50              # also run exit-sim at $50
+memecheck scan <ADDRESS> --buy-size 50 --max-slippage 3   # 3% impact target
+memecheck scan <ADDRESS> --buy-size 50 --fee-bps 100      # override pool fee
+memecheck scan <ADDRESS> --json                     # structured JSON output
+memecheck scan <ADDRESS> --liq 0.0001 --lev 5       # scan + liquidation calc inline
 ```
 
 `--chain` accepts `ethereum`, `bsc`, `base`, `arbitrum`, `polygon`, `optimism`,
 `avalanche`, and common aliases (`eth`, `arb`, `matic`, `avax`).
 
-### Exit codes
+### `watch` — real-time monitor
 
-The tool returns non-zero on findings, so it composes cleanly in shell pipelines
-and CI checks.
+```bash
+memecheck watch <ADDRESS>                           # default 5s poll, audit on
+memecheck watch <ADDRESS> --interval 2              # poll every 2s
+memecheck watch <ADDRESS> --max-ticks 10            # stop after 10 ticks
+memecheck watch <ADDRESS> --chain base              # force EVM chain
+memecheck watch <ADDRESS> --no-audit                # disable JSONL log
+memecheck watch <ADDRESS> --audit-dir /var/log/memecheck
+```
+
+Stops on `Ctrl+C`. See [the watch section below](#real-time-monitor-watch) for
+the decision rules, the audit log format, and the optional push-notification
+channels.
+
+### `calc` — liquidation-price calculator
+
+```bash
+memecheck calc --liq 0.0000123 --lev 10             # both required
+memecheck calc --liq 0.5 --lev 5 --json             # JSON output
+```
+
+See [the liquidation calculator section below](#liquidation-price-calculator)
+for the math.
+
+### Backward-compatible invocations
+
+```bash
+memecheck <ADDRESS>                                 # implicit scan
+memecheck --liq 0.01 --lev 5                        # implicit calc
+python3 -m memecheck <ADDRESS>                      # if not installed
+python3 memecheck.py <ADDRESS>                      # if not installed, from repo
+```
+
+### Help
+
+```bash
+memecheck --help                                    # top-level
+memecheck scan --help                               # subcommand-specific
+memecheck watch --help
+memecheck calc --help
+```
+
+### Exit codes (scan)
+
+The scanner returns non-zero on findings, so it composes cleanly in shell
+pipelines and CI checks.
 
 | Code | Meaning |
 |---|---|
@@ -128,10 +186,11 @@ and CI checks.
 | `2` | Honeypot detected (highest severity) |
 | `3` | No data available for the supplied address |
 
-### Verdict thresholds
+### Verdict thresholds (scan)
 
 The verdict is a deterministic function of the flag list and is documented as
-named constants at the top of [`memecheck.py`](memecheck.py):
+named constants in
+[`memecheck/common/verdict.py`](memecheck/common/verdict.py):
 
 - Honeypot detected → `HONEYPOT — do not buy` (exit 2)
 - 4 or more flags → `HARD PASS` (exit 1)
@@ -297,6 +356,112 @@ the displayed peak.
   trades across pools and do better than this estimate.
 - It does **not** account for MEV, sandwich attacks, or the pool's state
   changing between the time you check and the time you trade.
+
+## Real-time monitor (`watch`)
+
+`memecheck watch <ADDRESS>` polls the deepest pool for the token every
+`--interval` seconds, evaluates a decision engine on a rolling buffer of
+observations, and emits alerts when the rules fire. Console output and a
+JSONL audit log are always on; Telegram, Discord, and ntfy push channels
+activate from environment variables if you set them.
+
+### What it watches
+
+A single pool's USD liquidity over time, with derived windowed deltas:
+
+| Window | Use |
+|---|---|
+| Baseline (`L_0`) | The value when `watch` started — the reference point for "is liquidity still where it was when you entered?" |
+| 10s window | Fast-bleed signal — large drops over short intervals |
+| 60s window | Sustained-bleed signal at one-minute scale |
+| 300s window | Slow-bleed confirmation at five-minute scale |
+
+### Decision rules
+
+Three rules, with `EXECUTE > ALERT > NONE` severity. Defaults are in
+[`memecheck/monitor/decision.py`](memecheck/monitor/decision.py):
+
+| Rule | Trigger | Action | Debounce |
+|---|---|---|---|
+| **Critical floor** | $L_t / L_0 < 0.5$ | `EXECUTE` | none (immediate) |
+| **Large single event** | $\Delta L_{10\text{s}} \le -20\%$ | `EXECUTE` | 2 consecutive ticks |
+| **Slow bleed** | $\Delta L_{60\text{s}} \le -10\%$ AND $\Delta L_{300\text{s}} \le -15\%$ | `ALERT`, then `EXECUTE` | escalate after 6 consecutive ticks |
+
+Phase 2 wires the alert side only — `EXECUTE` decisions surface in the
+console and audit log but do not sign or send any transaction. The actual
+auto-sell path (Jupiter swap + Jito MEV-protected send + burner wallet) is
+gated behind a future `--execute` flag plus the `MEMECHECK_BURNER_KEY`
+environment variable; opt in only when you understand the risk.
+
+### Alert channels (optional, env-gated)
+
+All alert channels are off-by-default and constructed only if their
+environment variables are set. The console channel is always on. None
+require an account except where noted.
+
+```bash
+# Telegram — create a bot via @BotFather, /start it, get your chat id.
+export MEMECHECK_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl..."
+export MEMECHECK_TELEGRAM_CHAT_ID="987654321"
+
+# Discord webhook — channel settings → Integrations → Webhooks → New.
+export MEMECHECK_DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+
+# ntfy — pick a hard-to-guess topic, install the ntfy app, subscribe.
+export MEMECHECK_NTFY_TOPIC="memecheck-yourname-9f2a"
+export MEMECHECK_NTFY_SERVER="https://ntfy.sh"   # optional, default shown
+```
+
+Set zero of these and the monitor still works — alerts go to stderr and
+the audit log. Set all three and every alert fans out to console + phone +
+Discord in parallel.
+
+### Audit log
+
+Every run writes a newline-delimited JSON file to
+`./audit/<chain>-<addr-fingerprint>-<utc-timestamp>.jsonl` by default
+(override with `--audit-dir`, disable with `--no-audit`). One entry per
+event, decision, alert dispatch, plus `start` and `stop` markers. Useful
+both for post-mortems and for replaying decisions through a different
+threshold config later.
+
+### Sample output
+
+```
+########## memecheck watch — $WIF/SOL on solana via raydium (EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx) ##########
+alert channels: console
+audit log: /Users/cesaregundels/Crypto/audit/solana-EKpQGSJt-zcjm-20260601T154208Z.jsonl
+  tick   liq         price        vs L0    10s     60s     5m     action
+[tick    1] liq    $4.69M  px $0.1835  vs L0  +0.00%  10s   n/a  60s   n/a  5m   n/a  [NONE]
+[tick    2] liq    $4.69M  px $0.1835  vs L0  +0.00%  10s  +0.00%  60s   n/a  5m   n/a  [NONE]
+[tick    3] liq    $4.69M  px $0.1834  vs L0  -0.01%  10s  -0.01%  60s   n/a  5m   n/a  [NONE]
+```
+
+### Where to run it
+
+- **Your laptop while open** — fine for short positions, dies when the lid closes.
+- **A small VPS** (~$5/month) inside `tmux` or `screen` so it survives SSH
+  disconnects. The right answer for any position you care about for more than
+  a few hours.
+- **A Raspberry Pi** at home if you've got one.
+
+### Limitations (watch)
+
+- **Phase 1a uses REST polling** (DexScreener `/pairs` endpoint) at the
+  cadence you set with `--interval`. The slow-bleed case (the primary value
+  prop) works fine at 5-second cadence. Atomic LP pulls are detected one
+  poll late — by design, since beating an atomic single-tx pull requires
+  infrastructure this tool intentionally does not have. A Phase 1b
+  Solana-Raydium websocket source is planned for sub-second latency on that
+  specific path.
+- **Single pool, deepest-only.** The monitor tracks the chain+pool that
+  DexScreener reports as deepest at startup. If liquidity migrates to a
+  different pool mid-run, the monitor stays on the original. Restart it
+  to re-resolve.
+- **Strict windowed-delta semantics.** A delta over a window of `W`
+  seconds is only computed once the buffer holds at least `W` seconds of
+  history. This means the slow-bleed rule cannot fire in the first 5
+  minutes of a run — which is correct, but worth knowing.
 
 ## Liquidation-price calculator
 
