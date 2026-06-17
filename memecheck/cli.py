@@ -19,7 +19,7 @@ from typing import Optional
 from memecheck.common.liquidation import liq_report, liq_report_dict
 from memecheck.scanner.runner import run_token
 
-_SUBCOMMANDS = {"scan", "watch", "calc"}
+_SUBCOMMANDS = {"scan", "watch", "calc", "plan"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -109,6 +109,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
 
+    # ---- plan ------------------------------------------------------------
+    plan = sub.add_parser(
+        "plan",
+        help="position-sizing / R-multiple trade planner (no network)",
+        description=(
+            "Compute position notional, margin, liquidation distance, "
+            "TP prices for R-multiple targets, expected fees and funding "
+            "for a planned trade. Pure math; no token lookup."
+        ),
+    )
+    plan.add_argument(
+        "--account", type=float, required=True,
+        help="account / wallet size in USD",
+    )
+    plan.add_argument(
+        "--risk", type=float, default=1.0,
+        help="risk per trade as %% of account (default 1.0)",
+    )
+    plan.add_argument(
+        "--entry", type=float, required=True, help="entry price",
+    )
+    plan.add_argument(
+        "--stop", type=float, required=True, help="stop-loss price",
+    )
+    plan.add_argument(
+        "--leverage", type=float, default=None,
+        help="leverage (default: minimum needed to fit the position)",
+    )
+    plan.add_argument(
+        "--tp", type=float, action="append", dest="tp",
+        help="R-multiple TP target (repeatable; default 1, 2, 3)",
+    )
+    plan.add_argument(
+        "--maint-margin", type=float, default=0.005, dest="maint_margin",
+        help="maintenance margin ratio (default 0.005 = 0.5%%)",
+    )
+    plan.add_argument(
+        "--fee-bps", type=int, default=10, dest="fee_bps",
+        help="round-trip fee in basis points (default 10 = 0.10%%)",
+    )
+    plan.add_argument(
+        "--funding", type=float, default=0.01,
+        help="expected funding per 8h cycle in %% (default 0.01)",
+    )
+    plan.add_argument(
+        "--hold-hours", type=float, default=24.0, dest="hold_hours",
+        help="expected hold time in hours for funding cost (default 24)",
+    )
+    plan.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
     return parser
 
 
@@ -169,6 +222,33 @@ def _run_calc(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_plan(args: argparse.Namespace) -> int:
+    from memecheck.common.position import compute_plan, format_plan, plan_to_dict
+    plan = compute_plan(
+        account_usd=args.account,
+        risk_pct=args.risk,
+        entry_price=args.entry,
+        stop_price=args.stop,
+        leverage=args.leverage,
+        tp_r_multiples=args.tp or None,
+        maint_margin=args.maint_margin,
+        fee_bps=args.fee_bps,
+        funding_pct_8h=args.funding,
+        hold_hours=args.hold_hours,
+    )
+    if args.as_json:
+        print(json.dumps(plan_to_dict(plan), indent=2, default=str))
+    else:
+        print(format_plan(plan))
+    # Non-zero exit if the safety check says the position is dangerous —
+    # useful so a shell pipeline can refuse to send the order.
+    if plan.safety_level == "danger":
+        return 2
+    if plan.safety_level == "warn":
+        return 1
+    return 0
+
+
 def _print_menu() -> None:
     # Apply bold only when stdout is a real terminal (skip when piped to file).
     if sys.stdout.isatty():
@@ -206,6 +286,15 @@ WHAT IT DOES
 
        Example:
          memecheck calc --liq 0.0001 --lev 10
+
+  {b}plan --account A --entry E --stop S{r}
+       Position-sizing / R-multiple planner. Given your account,
+       entry, and stop, computes notional, margin, liquidation
+       distance with a safety check, and TP prices at 1R / 2R / 3R
+       net of fees + funding. Use BEFORE every leveraged trade.
+
+       Example:
+         memecheck plan --account 1000 --entry 0.0001 --stop 0.000094 --risk 1
 
 WHAT IT IS NOT
   - Not financial advice.
@@ -253,6 +342,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(_run_watch(args))
     elif args.cmd == "calc":
         sys.exit(_run_calc(args))
+    elif args.cmd == "plan":
+        sys.exit(_run_plan(args))
     else:
         _print_menu()
         sys.exit(0)
