@@ -132,19 +132,38 @@ def _decide_cex(state: CexState, side: Optional[str] = None) -> Decision:
 
 
 def _fmt_pct(p: Optional[float]) -> str:
-    return "   ·   " if p is None else f"{p:+6.3f}%"
+    """Always 7 chars wide. Centered dot when None, signed % otherwise."""
+    if p is None:
+        return "   ·   "       # 3 + 1 + 3 = 7 chars
+    return f"{p:+6.3f}%"        # "+0.001%" / "-12.345%" / " +0.000%" = 7 chars
 
 
 def _fmt_usd_short(x: Optional[float]) -> str:
+    """Always 8 chars wide. Adaptive K/M/B suffix."""
     if x is None:
-        return "    ·   "
+        return "   ·    "       # 8 chars
     if abs(x) >= 1e9:
-        return f"${x/1e9:6.2f}B"
+        return f"${x/1e9:>6.2f}B"   # "$  1.20B" = 8
     if abs(x) >= 1e6:
-        return f"${x/1e6:6.2f}M"
+        return f"${x/1e6:>6.2f}M"   # "$ 12.06M" = 8
     if abs(x) >= 1e3:
-        return f"${x/1e3:6.2f}K"
-    return f"${x:7.2f}"
+        return f"${x/1e3:>6.2f}K"   # "$  1.50K" = 8
+    return f"${x:>7.2f}"            # "$1234.56" = 8
+
+
+def _fmt_mark(x: float) -> str:
+    """Adaptive price formatter, right-padded to 11 chars to match header."""
+    if x == 0:
+        s = "$0"
+    elif x >= 1000:
+        s = f"${x:,.2f}"            # $67,234.12
+    elif x >= 1:
+        s = f"${x:.4f}"             # $1.1691
+    elif x >= 0.01:
+        s = f"${x:.6f}"             # $0.014523
+    else:
+        s = f"${x:.4g}"             # $1.234e-05
+    return s.rjust(11)              # right-align in 11-char column
 
 
 def _print_cex_header(symbol: str, side: Optional[str], channels: list[str], audit_path: Optional[Path]) -> None:
@@ -154,12 +173,13 @@ def _print_cex_header(symbol: str, side: Optional[str], channels: list[str], aud
     if audit_path is not None:
         print(f"audit log: {audit_path}")
     print()
+    # Column widths match _print_cex_tick exactly: 4 / 11 / 7 / 7 / 8 / 8 / 7
     print(
-        f" {'#':>4s} │ {'mark':>11s} │ {'fund/8h':>8s} │ {'basis':>8s} │"
-        f" {'vol 24h':>10s} │ {'OI':>10s} │ {'ΔOI':>8s} │ action"
+        f" {'#':>4s} │ {'mark':>11s} │ {'fund/8h':>7s} │ {'basis':>7s} │"
+        f" {'vol 24h':>8s} │ {'OI':>8s} │ {'ΔOI':>7s} │ action"
     )
     print(
-        "─────┼─────────────┼──────────┼──────────┼────────────┼────────────┼──────────┼────────"
+        "──────┼─────────────┼─────────┼─────────┼──────────┼──────────┼─────────┼────────"
     )
 
 
@@ -172,7 +192,7 @@ def _print_cex_tick(tick: int, ev: CexPerpEvent, dec: Decision) -> None:
         tag = ""
     print(
         f" {tick:>4d} │ "
-        f"${ev.mark:>10,.4f} │ "
+        f"{_fmt_mark(ev.mark)} │ "
         f"{_fmt_pct(ev.funding_per_8h_pct)} │ "
         f"{_fmt_pct(ev.basis_pct)} │ "
         f"{_fmt_usd_short(ev.vol_24h_usd)} │ "
