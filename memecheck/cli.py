@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from memecheck.common.liquidation import liq_report, liq_report_dict
 from memecheck.scanner.runner import run_token
@@ -150,8 +150,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="round-trip fee in basis points (default 10 = 0.10%%)",
     )
     plan.add_argument(
-        "--funding", type=float, default=0.01,
-        help="expected funding per 8h cycle in %% (default 0.01)",
+        "--funding", type=float, default=None,
+        help="explicit funding rate per 8h cycle in %%; overrides --symbol "
+             "auto-fetch (default 0.01 if neither --funding nor --symbol given)",
+    )
+    plan.add_argument(
+        "--symbol", type=str, default=None,
+        help="auto-fetch the current funding rate for this token from "
+             "Kraken Futures (e.g. XRP, BTC, ETH, SOL). Overridden by "
+             "--funding if both are passed.",
     )
     plan.add_argument(
         "--hold-hours", type=float, default=24.0, dest="hold_hours",
@@ -223,7 +230,51 @@ def _run_calc(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
-    from memecheck.common.position import compute_plan, format_plan, plan_to_dict
+    from memecheck.common.position import (
+        DEFAULT_FUNDING_PCT_8H,
+        compute_plan,
+        format_plan,
+        plan_to_dict,
+    )
+
+    # Funding precedence: explicit --funding > --symbol auto-fetch > default.
+    funding_note: Optional[str] = None
+    funding_extra: dict[str, Any] = {}
+    if args.funding is not None:
+        funding_pct = args.funding
+        if args.symbol:
+            funding_note = (
+                f"using --funding {args.funding:+.4f}% (override; "
+                f"--symbol {args.symbol.upper()} ignored)"
+            )
+    elif args.symbol:
+        from memecheck.common.funding import fetch_funding_rate
+        result = fetch_funding_rate(args.symbol)
+        if result is not None:
+            funding_pct = result.rate_per_8h_pct
+            funding_note = (
+                f"auto-fetched {result.symbol} funding from {result.source}: "
+                f"{funding_pct:+.4f}% per 8h "
+                f"(mark ${result.mark_price})"
+            )
+            funding_extra = {
+                "symbol": result.symbol,
+                "source": result.source,
+                "raw_rate": result.raw_rate,
+                "raw_unit": result.raw_unit,
+                "mark_price": result.mark_price,
+                "perp_symbol": result.perp_symbol,
+            }
+        else:
+            funding_pct = DEFAULT_FUNDING_PCT_8H
+            funding_note = (
+                f"could not fetch funding for {args.symbol.upper()} "
+                f"(symbol not listed on Kraken Futures, or fetch failed); "
+                f"using default {DEFAULT_FUNDING_PCT_8H:+.4f}% / 8h"
+            )
+    else:
+        funding_pct = DEFAULT_FUNDING_PCT_8H
+
     plan = compute_plan(
         account_usd=args.account,
         risk_pct=args.risk,
@@ -233,15 +284,20 @@ def _run_plan(args: argparse.Namespace) -> int:
         tp_r_multiples=args.tp or None,
         maint_margin=args.maint_margin,
         fee_bps=args.fee_bps,
-        funding_pct_8h=args.funding,
+        funding_pct_8h=funding_pct,
         hold_hours=args.hold_hours,
     )
+
     if args.as_json:
-        print(json.dumps(plan_to_dict(plan), indent=2, default=str))
+        payload = plan_to_dict(plan)
+        if funding_note or funding_extra:
+            payload["funding_resolution"] = {"note": funding_note, **funding_extra}
+        print(json.dumps(payload, indent=2, default=str))
     else:
+        if funding_note:
+            print(f"  ↻ {funding_note}")
         print(format_plan(plan))
-    # Non-zero exit if the safety check says the position is dangerous —
-    # useful so a shell pipeline can refuse to send the order.
+
     if plan.safety_level == "danger":
         return 2
     if plan.safety_level == "warn":
