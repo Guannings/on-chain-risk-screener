@@ -29,9 +29,9 @@ binary. Pick the column that matches the trade you're about to make:
 | **Trade journal** | `journal` — auto-logged history of every `prep` / `cex-prep` run |
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Data flow for the scan subcommand: a token address fans out to DexScreener, RugCheck, and honeypot.is, then into a threshold analyzer that emits flags, a verdict, and an exit code." width="780">
+  <img src="assets/architecture-layers.svg" alt="memecheck architecture: three input families (DEX, CEX perp, backtest tape, pure math) feed three shared engines (threshold analyzers, decider, position planner) that emit to stdout, audit log, trade journal, alert dispatcher, and exit codes." width="900">
   <br>
-  <em>Data flow for a single <code>scan</code> — the original entry point. See <a href="#how-it-works">How it works</a> below for the full layered architecture.</em>
+  <em>Three input families feed three shared engines and a common output bus. Each of the 10 subcommands is a path through this graph.</em>
 </p>
 
 ## Quickstart
@@ -648,13 +648,9 @@ auctions, all of which make your real liquidation closer than this number.
 ## How it works
 
 A reader's guide to the mechanics. Read this once and you can extend,
-debug, or explain any part of the tool from first principles.
-
-<p align="center">
-  <img src="assets/architecture-layers.svg" alt="Layered architecture: DEX inputs, CEX perp inputs, backtest tape inputs, and pure-math inputs all feed three shared engines (threshold analyzers, decider, position planner) that emit to stdout, audit log, trade journal, alert dispatcher, and exit codes." width="900">
-  <br>
-  <em>Three input families feed three shared engines that emit to a common output bus. Each subcommand is a path through this graph.</em>
-</p>
+debug, or explain any part of the tool from first principles. The
+architecture diagram at the top of the README is the visual companion
+to the prose below.
 
 ### The data flow, one tick at a time
 
