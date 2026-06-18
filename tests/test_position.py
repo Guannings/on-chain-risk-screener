@@ -166,6 +166,58 @@ def test_net_pnl_subtracts_fees_and_funding() -> None:
     assert math.isclose(s1.net_pnl_usd, expected_net, rel_tol=1e-9)
 
 
+def test_long_pays_positive_funding() -> None:
+    """POSITIVE funding rate means longs pay shorts → cost to a long."""
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        funding_pct_8h=+0.05, hold_hours=24,
+    )
+    assert p.side == "long"
+    assert p.estimated_funding_usd > 0          # positive cost
+    # Net must be lower than gross because of the cost.
+    s = next(x for x in p.tp_scenarios if x.r == 1.0)
+    assert s.net_pnl_usd < s.gross_pnl_usd
+
+
+def test_long_receives_negative_funding() -> None:
+    """NEGATIVE funding rate means shorts pay longs → income for a long."""
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        funding_pct_8h=-0.05, hold_hours=24, fee_bps=0,
+    )
+    assert p.estimated_funding_usd < 0          # negative cost = income
+    s = next(x for x in p.tp_scenarios if x.r == 1.0)
+    assert s.net_pnl_usd > s.gross_pnl_usd     # better than gross
+
+
+def test_short_pays_negative_funding() -> None:
+    """NEGATIVE funding rate means shorts pay longs → cost to a short.
+
+    The original bug: net was higher than gross because funding sign wasn't
+    flipped for shorts. This test locks in the fix.
+    """
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=105.0,
+        funding_pct_8h=-0.05, hold_hours=24,
+    )
+    assert p.side == "short"
+    assert p.estimated_funding_usd > 0          # positive cost to the short
+    s = next(x for x in p.tp_scenarios if x.r == 1.0)
+    assert s.net_pnl_usd < s.gross_pnl_usd      # net must be < gross
+
+
+def test_short_receives_positive_funding() -> None:
+    """POSITIVE funding rate means longs pay shorts → income for a short."""
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=105.0,
+        funding_pct_8h=+0.05, hold_hours=24, fee_bps=0,
+    )
+    assert p.side == "short"
+    assert p.estimated_funding_usd < 0          # negative cost = income
+    s = next(x for x in p.tp_scenarios if x.r == 1.0)
+    assert s.net_pnl_usd > s.gross_pnl_usd
+
+
 def test_custom_tp_multiples() -> None:
     p = compute_plan(
         account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,

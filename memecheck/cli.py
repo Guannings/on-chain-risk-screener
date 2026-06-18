@@ -19,7 +19,7 @@ from typing import Any, Optional
 from memecheck.common.liquidation import liq_report, liq_report_dict
 from memecheck.scanner.runner import run_token
 
-_SUBCOMMANDS = {"scan", "watch", "calc", "plan"}
+_SUBCOMMANDS = {"scan", "watch", "calc", "plan", "prep", "cex-check", "cex-prep"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -169,6 +169,127 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
 
+    # ---- prep ------------------------------------------------------------
+    prep = sub.add_parser(
+        "prep",
+        help="composed pre-entry workflow: scan + plan, gated by verdict",
+        description=(
+            "Run scan and plan together as one pre-entry checklist. The "
+            "plan's computed position notional is fed into scan's exit-sim "
+            "automatically. If scan returns HONEYPOT or HARD PASS, prep "
+            "REFUSES to print the plan — that's the point. Pass --force "
+            "to override. Explicitly NOT a trading bot: nothing here "
+            "signs, sends, or executes anything."
+        ),
+    )
+    prep.add_argument("address", help="token contract / mint address")
+    prep.add_argument("--chain", help="force EVM chain for scan")
+    prep.add_argument(
+        "--account", type=float, required=True,
+        help="account / wallet size in USD",
+    )
+    prep.add_argument(
+        "--risk", type=float, default=1.0,
+        help="risk per trade as %% of account (default 1.0)",
+    )
+    prep.add_argument(
+        "--entry", type=float, required=True, help="entry price",
+    )
+    prep.add_argument(
+        "--stop", type=float, required=True, help="stop-loss price",
+    )
+    prep.add_argument(
+        "--leverage", type=float, default=None,
+        help="leverage (default: minimum needed to fit the position)",
+    )
+    prep.add_argument(
+        "--symbol", type=str, default=None,
+        help="auto-fetch funding rate for this CEX perp ticker "
+             "(e.g. XRP). Separate from the on-chain address.",
+    )
+    prep.add_argument(
+        "--funding", type=float, default=None,
+        help="explicit funding rate per 8h cycle in %% (overrides --symbol)",
+    )
+    prep.add_argument(
+        "--hold-hours", type=float, default=24.0, dest="hold_hours",
+        help="expected hold time in hours (default 24)",
+    )
+    prep.add_argument(
+        "--force", action="store_true",
+        help="print the plan even if scan returns HARD PASS or HONEYPOT "
+             "(strongly discouraged)",
+    )
+    prep.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
+    # ---- cex-check -------------------------------------------------------
+    cex_check = sub.add_parser(
+        "cex-check",
+        help="pre-trade health screen for a CEX perpetual (Kraken Futures)",
+        description=(
+            "Pulls live ticker for the given CEX perp from Kraken Futures and "
+            "checks funding, basis, volume, spread, and recent volatility. "
+            "Same (flags, notes, verdict) shape as `scan` but for centralised "
+            "perps instead of on-chain DEX pools."
+        ),
+    )
+    cex_check.add_argument(
+        "symbol", help="ticker for the CEX perp (e.g. XRP, BTC, ETH, SOL)",
+    )
+    cex_check.add_argument(
+        "--side", choices=["long", "short"], default=None,
+        help="trade side for funding-direction analysis (optional)",
+    )
+    cex_check.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
+    # ---- cex-prep --------------------------------------------------------
+    cex_prep = sub.add_parser(
+        "cex-prep",
+        help="composed CEX pre-entry workflow: cex-check + plan, gated by verdict",
+        description=(
+            "CEX-side equivalent of `prep`. Runs cex-check on the symbol, "
+            "then plan, and refuses to print the plan if cex-check verdict "
+            "is HARD PASS. Funding rate is auto-fetched from the same "
+            "ticker call. Explicitly NOT a trading bot."
+        ),
+    )
+    cex_prep.add_argument("symbol", help="ticker for the CEX perp (e.g. XRP)")
+    cex_prep.add_argument(
+        "--account", type=float, required=True, help="account size in USD",
+    )
+    cex_prep.add_argument(
+        "--risk", type=float, default=1.0,
+        help="risk per trade as %% of account (default 1.0)",
+    )
+    cex_prep.add_argument(
+        "--entry", type=float, required=True, help="entry price",
+    )
+    cex_prep.add_argument(
+        "--stop", type=float, required=True, help="stop-loss price",
+    )
+    cex_prep.add_argument(
+        "--leverage", type=float, default=None,
+        help="leverage (default: minimum needed)",
+    )
+    cex_prep.add_argument(
+        "--hold-hours", type=float, default=24.0, dest="hold_hours",
+        help="expected hold time in hours (default 24)",
+    )
+    cex_prep.add_argument(
+        "--force", action="store_true",
+        help="print the plan even if cex-check returns HARD PASS",
+    )
+    cex_prep.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
     return parser
 
 
@@ -229,51 +350,64 @@ def _run_calc(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_plan(args: argparse.Namespace) -> int:
-    from memecheck.common.position import (
-        DEFAULT_FUNDING_PCT_8H,
-        compute_plan,
-        format_plan,
-        plan_to_dict,
-    )
+def _resolve_funding(
+    explicit_funding: Optional[float],
+    symbol: Optional[str],
+) -> tuple[float, Optional[str], dict[str, Any]]:
+    """Resolve funding rate from --funding / --symbol with explicit precedence.
 
-    # Funding precedence: explicit --funding > --symbol auto-fetch > default.
-    funding_note: Optional[str] = None
-    funding_extra: dict[str, Any] = {}
-    if args.funding is not None:
-        funding_pct = args.funding
-        if args.symbol:
-            funding_note = (
-                f"using --funding {args.funding:+.4f}% (override; "
-                f"--symbol {args.symbol.upper()} ignored)"
+    Returns (pct_per_8h, human_note, extra_dict_for_json).
+    """
+    from memecheck.common.position import DEFAULT_FUNDING_PCT_8H
+
+    if explicit_funding is not None:
+        note = None
+        if symbol:
+            note = (
+                f"using --funding {explicit_funding:+.4f}% (override; "
+                f"--symbol {symbol.upper()} ignored)"
             )
-    elif args.symbol:
+        return explicit_funding, note, {}
+
+    if symbol:
         from memecheck.common.funding import fetch_funding_rate
-        result = fetch_funding_rate(args.symbol)
+        result = fetch_funding_rate(symbol)
         if result is not None:
-            funding_pct = result.rate_per_8h_pct
-            funding_note = (
-                f"auto-fetched {result.symbol} funding from {result.source}: "
-                f"{funding_pct:+.4f}% per 8h "
-                f"(mark ${result.mark_price})"
+            return (
+                result.rate_per_8h_pct,
+                (
+                    f"auto-fetched {result.symbol} funding from {result.source}: "
+                    f"{result.rate_per_8h_pct:+.4f}% per 8h "
+                    f"(mark ${result.mark_price})"
+                ),
+                {
+                    "symbol": result.symbol,
+                    "source": result.source,
+                    "raw_rate": result.raw_rate,
+                    "raw_unit": result.raw_unit,
+                    "mark_price": result.mark_price,
+                    "perp_symbol": result.perp_symbol,
+                },
             )
-            funding_extra = {
-                "symbol": result.symbol,
-                "source": result.source,
-                "raw_rate": result.raw_rate,
-                "raw_unit": result.raw_unit,
-                "mark_price": result.mark_price,
-                "perp_symbol": result.perp_symbol,
-            }
-        else:
-            funding_pct = DEFAULT_FUNDING_PCT_8H
-            funding_note = (
-                f"could not fetch funding for {args.symbol.upper()} "
+        return (
+            DEFAULT_FUNDING_PCT_8H,
+            (
+                f"could not fetch funding for {symbol.upper()} "
                 f"(symbol not listed on Kraken Futures, or fetch failed); "
                 f"using default {DEFAULT_FUNDING_PCT_8H:+.4f}% / 8h"
-            )
-    else:
-        funding_pct = DEFAULT_FUNDING_PCT_8H
+            ),
+            {},
+        )
+
+    return DEFAULT_FUNDING_PCT_8H, None, {}
+
+
+def _run_plan(args: argparse.Namespace) -> int:
+    from memecheck.common.position import compute_plan, format_plan, plan_to_dict
+
+    funding_pct, funding_note, funding_extra = _resolve_funding(
+        args.funding, args.symbol
+    )
 
     plan = compute_plan(
         account_usd=args.account,
@@ -303,6 +437,330 @@ def _run_plan(args: argparse.Namespace) -> int:
     if plan.safety_level == "warn":
         return 1
     return 0
+
+
+def _run_prep(args: argparse.Namespace) -> int:
+    """Composed pre-entry workflow: scan + plan with verdict-based gating.
+
+    Sequence:
+      1. Compute the trade plan (pure math, no I/O).
+      2. Run scan on the address, with --buy-size set to plan's notional
+         so the exit-sim runs at the actual size you'd trade.
+      3. If scan's verdict is HONEYPOT or HARD PASS, REFUSE to print the
+         plan (unless --force). That's the whole point of prep.
+      4. If RISKY, warn loudly but print the plan — user opted in.
+      5. If clean, green-light and print the plan.
+
+    Explicitly NOT a trading bot. Nothing in this function signs, sends,
+    or executes any transaction.
+    """
+    from memecheck.common.position import (
+        compute_plan,
+        format_plan,
+        plan_to_dict,
+    )
+    from memecheck.scanner.runner import run_token
+
+    # ----- Step 1: compute plan (pure math) ------------------------------
+    funding_pct, funding_note, funding_extra = _resolve_funding(
+        args.funding, args.symbol
+    )
+    plan = compute_plan(
+        account_usd=args.account,
+        risk_pct=args.risk,
+        entry_price=args.entry,
+        stop_price=args.stop,
+        leverage=args.leverage,
+        funding_pct_8h=funding_pct,
+        hold_hours=args.hold_hours,
+    )
+
+    # ----- Step 2: run scan with buy_size = plan's notional --------------
+    if not args.as_json:
+        print("\n========== STEP 1/2 — Scanning token ==========")
+    scan_result, scan_exit = run_token(
+        args.address.strip(),
+        forced_chain=args.chain,
+        as_json=args.as_json,
+        buy_size_usd=plan.position_notional_usd,
+        max_slippage_pct=5.0,
+        fee_bps_override=None,
+    )
+    verdict = scan_result.get("verdict") or ""
+
+    # ----- Step 3: gate decision -----------------------------------------
+    is_honeypot = verdict.startswith("HONEYPOT")
+    is_hard_pass = verdict.startswith("HARD PASS")
+    is_risky = verdict.startswith("RISKY")
+    refuse = (is_honeypot or is_hard_pass) and not args.force
+
+    if args.as_json:
+        # JSON mode: include both halves + the gating decision.
+        out = {
+            "scan": scan_result,
+            "verdict": verdict,
+            "gate": {
+                "refused": refuse,
+                "reason": (
+                    "HONEYPOT" if is_honeypot else
+                    "HARD PASS" if is_hard_pass else
+                    "RISKY (printed with warning)" if is_risky else
+                    "clean"
+                ),
+                "force": args.force,
+            },
+        }
+        if not refuse:
+            out["plan"] = plan_to_dict(plan)
+            if funding_note or funding_extra:
+                out["plan"]["funding_resolution"] = {
+                    "note": funding_note, **funding_extra
+                }
+        print(json.dumps(out, indent=2, default=str))
+        return _combined_exit_code(scan_exit, plan, refuse)
+
+    # Human-readable: print the gating banner, then plan if not refused.
+    print()
+    bar = "=" * 60
+    if refuse:
+        if is_honeypot:
+            tag, msg = "⛔ REFUSING TO PRINT PLAN", "scan detected a HONEYPOT"
+        else:
+            tag, msg = "⛔ REFUSING TO PRINT PLAN", "scan returned HARD PASS"
+        print(bar)
+        print(f"{tag}")
+        print(f"   Reason: {msg}.")
+        print(f"   This is exactly the kind of trade prep was built to stop.")
+        print(f"   Pass --force to override (please don't).")
+        print(bar)
+        return _combined_exit_code(scan_exit, plan, refuse=True)
+
+    if is_risky:
+        print(bar)
+        print("⚠  Scan returned RISKY.")
+        print("   Plan follows so you can size with eyes open if you still")
+        print("   want to enter. Proceed only with money already written off.")
+        print(bar)
+    elif is_honeypot or is_hard_pass:
+        # Refusal bypassed via --force.
+        print(bar)
+        print(f"⛔ Scan verdict: {verdict}")
+        print("   You passed --force. Plan follows under protest.")
+        print(bar)
+    else:
+        print(bar)
+        print("✓ Scan clean — no automatic red flags.")
+        print("   Plan follows. The decision is still yours.")
+        print(bar)
+
+    print("\n========== STEP 2/2 — Trade plan ==========")
+    if funding_note:
+        print(f"  ↻ {funding_note}")
+    print(format_plan(plan))
+    return _combined_exit_code(scan_exit, plan, refuse=False)
+
+
+def _combined_exit_code(scan_exit: int, plan: Any, refuse: bool) -> int:
+    """Worst of scan exit and plan safety level wins.
+
+    Refusal latches at exit 2 regardless of what the plan thinks.
+    """
+    if refuse:
+        return 2
+    plan_exit = 0
+    if plan.safety_level == "danger":
+        plan_exit = 2
+    elif plan.safety_level == "warn":
+        plan_exit = 1
+    return max(scan_exit, plan_exit)
+
+
+def _run_cex_check(args: argparse.Namespace) -> int:
+    from memecheck.common.cex_health import (
+        analyze_cex_perp,
+        exit_code_for_cex,
+        fetch_cex_ticker,
+        make_cex_verdict,
+    )
+
+    ticker = fetch_cex_ticker(args.symbol)
+    if ticker is None:
+        msg = (
+            f"could not find {args.symbol.upper()} perp on Kraken Futures "
+            f"(symbol not listed or fetch failed)"
+        )
+        if args.as_json:
+            print(json.dumps({"error": msg, "symbol": args.symbol.upper()}, indent=2))
+        else:
+            print(f"cex-check: {msg}", file=sys.stderr)
+        return 3
+
+    flags, notes, metrics = analyze_cex_perp(ticker, side=args.side)
+    verdict = make_cex_verdict(flags)
+
+    if args.as_json:
+        print(json.dumps(
+            {
+                "symbol": args.symbol.upper(),
+                "side": args.side,
+                "metrics": metrics,
+                "flags": flags,
+                "verdict": verdict,
+            },
+            indent=2,
+            default=str,
+        ))
+        return exit_code_for_cex(verdict)
+
+    print(f"\n########## cex-check: {args.symbol.upper()} perp ##########")
+    if args.side:
+        print(f"  Side: {args.side.upper()}")
+    print("\n--- Market ---")
+    for n in notes:
+        print(f"  {n}")
+    print("\n================ RED FLAGS ================")
+    if flags:
+        for f in flags:
+            print(f"  [!] {f}")
+    else:
+        print("  (none)")
+    print(f"\nVerdict: {verdict}")
+    print("Not financial advice. Crowded positioning and funding extremes can persist for weeks.")
+    return exit_code_for_cex(verdict)
+
+
+def _run_cex_prep(args: argparse.Namespace) -> int:
+    """CEX-side composed workflow: cex-check + plan, gated like prep."""
+    from memecheck.common.cex_health import (
+        analyze_cex_perp,
+        exit_code_for_cex,
+        fetch_cex_ticker,
+        make_cex_verdict,
+    )
+    from memecheck.common.position import (
+        DEFAULT_FUNDING_PCT_8H,
+        compute_plan,
+        format_plan,
+        plan_to_dict,
+    )
+
+    # Side inferred from entry/stop.
+    side = "long" if args.stop < args.entry else "short"
+
+    # Single ticker call serves both the screen and the funding rate.
+    ticker = fetch_cex_ticker(args.symbol)
+    if ticker is None:
+        msg = (
+            f"cex-prep: could not find {args.symbol.upper()} perp on "
+            f"Kraken Futures"
+        )
+        print(msg, file=sys.stderr)
+        return 3
+
+    # ----- Step 1: CEX health screen ------------------------------------
+    flags, notes, metrics = analyze_cex_perp(ticker, side=side)
+    verdict = make_cex_verdict(flags)
+
+    # Funding from the same ticker, normalised exactly as the funding module does.
+    funding_pct = metrics.get("funding_per_8h_pct")
+    if funding_pct is None:
+        funding_pct = DEFAULT_FUNDING_PCT_8H
+
+    # ----- Step 2: compute plan ----------------------------------------
+    plan = compute_plan(
+        account_usd=args.account,
+        risk_pct=args.risk,
+        entry_price=args.entry,
+        stop_price=args.stop,
+        leverage=args.leverage,
+        funding_pct_8h=funding_pct,
+        hold_hours=args.hold_hours,
+    )
+
+    is_hard_pass = verdict.startswith("HARD PASS")
+    is_risky = verdict.startswith("RISKY")
+    refuse = is_hard_pass and not args.force
+
+    if args.as_json:
+        out = {
+            "cex_check": {
+                "symbol": args.symbol.upper(),
+                "side": side,
+                "metrics": metrics,
+                "flags": flags,
+                "verdict": verdict,
+            },
+            "gate": {
+                "refused": refuse,
+                "reason": (
+                    "HARD PASS" if is_hard_pass else
+                    "RISKY (printed with warning)" if is_risky else
+                    "clean"
+                ),
+                "force": args.force,
+            },
+        }
+        if not refuse:
+            out["plan"] = plan_to_dict(plan)
+            out["plan"]["funding_resolution"] = {
+                "note": (
+                    f"auto-fetched from Kraken Futures ticker for "
+                    f"{args.symbol.upper()}: {funding_pct:+.4f}% per 8h"
+                ),
+            }
+        print(json.dumps(out, indent=2, default=str))
+        return _combined_exit_code(exit_code_for_cex(verdict), plan, refuse)
+
+    # Human-readable mode.
+    print(f"\n========== STEP 1/2 — CEX health check ==========")
+    print(f"\n########## cex-check: {args.symbol.upper()} perp ##########")
+    print(f"  Side: {side.upper()} (inferred from entry/stop)")
+    print("\n--- Market ---")
+    for n in notes:
+        print(f"  {n}")
+    print("\n================ RED FLAGS ================")
+    if flags:
+        for f in flags:
+            print(f"  [!] {f}")
+    else:
+        print("  (none)")
+    print(f"\nVerdict: {verdict}")
+
+    bar = "=" * 60
+    print()
+    if refuse:
+        print(bar)
+        print("⛔ REFUSING TO PRINT PLAN")
+        print(f"   Reason: cex-check returned HARD PASS.")
+        print(f"   This is exactly the kind of trade prep was built to stop.")
+        print(f"   Pass --force to override (please don't).")
+        print(bar)
+        return 2
+
+    if is_risky:
+        print(bar)
+        print("⚠  cex-check returned RISKY.")
+        print("   Plan follows so you can size with eyes open if you still")
+        print("   want to enter. Proceed only with money already written off.")
+        print(bar)
+    elif is_hard_pass:
+        print(bar)
+        print("⛔ cex-check verdict: HARD PASS — but you passed --force.")
+        print("   Plan follows under protest.")
+        print(bar)
+    else:
+        print(bar)
+        print("✓ cex-check clean — no automatic red flags.")
+        print("   Plan follows. The decision is still yours.")
+        print(bar)
+
+    print(f"\n========== STEP 2/2 — Trade plan ==========")
+    print(
+        f"  ↻ auto-fetched {args.symbol.upper()} funding from kraken-futures: "
+        f"{funding_pct:+.4f}% per 8h"
+    )
+    print(format_plan(plan))
+    return _combined_exit_code(exit_code_for_cex(verdict), plan, refuse=False)
 
 
 def _print_menu() -> None:
@@ -352,6 +810,33 @@ WHAT IT DOES
        Example:
          memecheck plan --account 1000 --entry 0.0001 --stop 0.000094 --risk 1
 
+  {b}prep <ADDRESS> --account A --entry E --stop S{r}
+       Composed pre-entry workflow for ON-CHAIN tokens (DEX).
+       Runs scan, then plan, REFUSES to print the plan if scan
+       returns HONEYPOT or HARD PASS. Plan's notional is auto-fed
+       into scan's exit-sim so price impact is checked at your
+       real size. Not a trading bot.
+
+       Example:
+         memecheck prep 0x6982... --account 1000 --entry 0.0001 --stop 0.000094
+
+  {b}cex-check <SYMBOL>{r}     CEX PERP pre-trade screen.
+       Pulls live ticker from Kraken Futures and checks funding,
+       basis, volume, spread, 24h move. Same shape as scan, but
+       for centralised perps (XRP, BTC, ETH, SOL, ...). Pass
+       --side long|short for funding-direction analysis.
+
+       Example:
+         memecheck cex-check XRP --side short
+
+  {b}cex-prep <SYMBOL> --account A --entry E --stop S{r}
+       Composed CEX pre-entry workflow. cex-check + plan, gated
+       on HARD PASS the same way prep is. Funding rate auto-
+       fetched from the same Kraken Futures ticker. Not a bot.
+
+       Example:
+         memecheck cex-prep XRP --account 1000 --entry 1.16 --stop 1.20
+
 WHAT IT IS NOT
   - Not financial advice.
   - Not a trading bot — it does not sign or send transactions.
@@ -400,6 +885,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(_run_calc(args))
     elif args.cmd == "plan":
         sys.exit(_run_plan(args))
+    elif args.cmd == "prep":
+        sys.exit(_run_prep(args))
+    elif args.cmd == "cex-check":
+        sys.exit(_run_cex_check(args))
+    elif args.cmd == "cex-prep":
+        sys.exit(_run_cex_prep(args))
     else:
         _print_menu()
         sys.exit(0)

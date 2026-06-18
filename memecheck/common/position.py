@@ -160,7 +160,15 @@ def compute_plan(
     # Costs.
     round_trip_fee = position_notional * (fee_bps / 10_000.0)
     funding_cycles = hold_hours / 8.0
-    estimated_funding = position_notional * (funding_pct_8h / 100.0) * funding_cycles
+    # Funding sign convention:
+    #   POSITIVE funding rate = longs pay shorts
+    #   NEGATIVE funding rate = shorts pay longs
+    # `estimated_funding` here represents the COST TO THE TRADER (positive =
+    # outflow, negative = inflow), so the sign must flip based on trade side:
+    #   long:  cost = +rate * notional * cycles    (positive rate hurts long)
+    #   short: cost = -rate * notional * cycles    (negative rate hurts short)
+    funding_signed = position_notional * (funding_pct_8h / 100.0) * funding_cycles
+    estimated_funding = funding_signed if side == "long" else -funding_signed
 
     # R-multiple TP scenarios.
     scenarios: list[TPScenario] = []
