@@ -584,6 +584,475 @@ The default $mm = 0.005$ matches typical perp-DEX defaults. The calculator is a
 sanity check — it ignores funding, slippage, and venue-specific liquidation
 auctions, all of which make your real liquidation closer than this number.
 
+## How it works
+
+A reader's guide to the mechanics. Read this once and you can extend,
+debug, or explain any part of the tool from first principles.
+
+### The data flow, one tick at a time
+
+Every part of the tool, whether a one-shot `scan` or a long-running
+`watch`, follows the same shape. Trace a single observation through:
+
+1. A **source** emits an `Event` — for `watch`, an `httpx.get` against
+   DexScreener; for `cex-watch`, a `POST` to Kraken Futures `/tickers`;
+   for `backtest`, the next CSV row. The event is a frozen dataclass
+   with the raw numbers (reserves, mark, basis) and a unix timestamp.
+2. The runner appends the event into **state** — a `deque(maxlen=512)`
+   of past events. State is the only thing that holds memory.
+3. The runner calls the **decider** with the current state. The decider
+   reads recent events, computes windowed deltas, walks its rules in
+   priority order, and returns a `Decision(action, reason, metrics)`.
+4. If the action is `ALERT` or `EXECUTE`, the **action layer** fans the
+   decision out to whatever channels are configured. Console always
+   gets it; the optional channels run in parallel via
+   `asyncio.gather`.
+5. **Audit** writes one JSONL line per event with the raw observation,
+   the decision, and any dispatch results. The file is line-buffered so
+   a crash never loses a tick that was already evaluated.
+
+The five steps are layers, not files. Each layer talks to the next
+through a `dataclass(frozen=True)` and never reaches across. The same
+decider can run on live DexScreener events or on a CSV tape — that's
+why `backtest` is twenty lines of code and not a separate engine.
+
+### Architectural layers
+
+The repository organises those five steps into three concrete layers,
+each replaceable on its own:
+
+| Layer | What it does | Concrete modules |
+|---|---|---|
+| **Source** | Pulls live data, yields events | `monitor/source.py` (DexScreener), `monitor/cex_source.py` (Kraken Futures), `common/funding.py` (Kraken + Hyperliquid funding) |
+| **State + decision** | Pure logic over a rolling buffer | `monitor/state.py`, `monitor/decision.py`, `common/cex_health.py` |
+| **Action** | Audit, alert, optionally execute | `monitor/audit.py`, `monitor/action/alert.py` |
+
+Add a new exchange by writing a new source. Add a new rule by editing
+the decider. Add a new alert channel by implementing one method. None
+of those touch the other layers.
+
+### How the alert dispatcher fans out
+
+`AlertDispatcher` holds a list of `AlertChannel` instances. On
+construction it inspects environment variables and only instantiates the
+channels whose credentials exist:
+
+```
+console      always (writes to stderr)
+telegram     iff MEMECHECK_TELEGRAM_TOKEN + MEMECHECK_TELEGRAM_CHAT_ID
+discord      iff MEMECHECK_DISCORD_WEBHOOK
+ntfy         iff MEMECHECK_NTFY_TOPIC
+```
+
+When `dispatch(decision, event, header)` is called, it submits each
+channel's `send_sync` to the asyncio executor pool and awaits them all
+together, so a slow Telegram API call doesn't block the Discord webhook
+or the next tick. Every dispatch result (channel, ok, detail) goes into
+the audit log so you can grep for failures later.
+
+### How the journal stores entries
+
+The trade journal uses stdlib `sqlite3` with a single table:
+
+```
+trades(id, ts, iso_ts, venue, symbol_or_addr, side,
+       account_usd, entry_price, stop_price, leverage,
+       position_notional_usd, risk_usd, verdict,
+       refused, forced, funding_per_8h_pct, notes)
+```
+
+Indexes on `ts` and `symbol_or_addr` so common queries — recent
+activity, per-symbol history — are sub-millisecond even after thousands
+of trades. SQLite gives atomic single-statement writes for free; flat
+files would need explicit locking on concurrent appends and would not
+support filtered queries without scanning the whole file.
+
+`prep` and `cex-prep` call `log_entry` after they finish printing the
+plan. The write is wrapped in a `try/except` so a journal failure can
+never crash a prep run.
+
+### How the backtest harness works
+
+Given a tape of `(timestamp, liquidity_usd, price_usd)` rows, `replay`
+constructs synthetic `LiquidityEvent`s, feeds them into `MonitorState`
+in order, and asks the same `Decider` you'd use in production what it
+would have done. Every non-`NONE` decision is recorded with its
+timestamp and reason. If a labels file is provided, each labelled rug
+is matched against the actions within `±60s` (default tolerance), and
+the report includes:
+
+$$\text{precision} = \frac{\text{actions that matched a rug}}{\text{total actions}} \qquad \text{recall} = \frac{\text{rugs matched}}{\text{rugs in labels}}$$
+
+Tweaking `--critical-ratio` and re-running gives you a quick sensitivity
+analysis — *how much does pulling the critical-floor threshold from 0.5
+to 0.4 cost in recall?* The harness was built for exactly that loop.
+
+## Concepts & terminology
+
+The financial mechanics the tool reasons about. Skim if you're already
+fluent; read if any of the term in a flag or note is unfamiliar.
+
+### Automated market maker (AMM)
+
+A smart contract that holds two token reserves $R_b$ and $R_q$ and lets
+anyone swap between them by paying into one side and withdrawing the
+other. The simplest invariant is **constant product**:
+
+$$R_b \cdot R_q = k \text{ (constant)}$$
+
+Swapping $\Delta_q$ in changes the reserves to $(R_b - \Delta_b, R_q + \Delta_q)$
+where $\Delta_b$ is computed so the product is preserved. The displayed
+"price" of base in quote is $R_q / R_b$, which is the *marginal* price
+for an infinitesimal trade. Larger trades walk the curve and pay
+more — that's price impact.
+
+Raydium, Uniswap V2, PancakeSwap, and pump.fun all use this shape with
+different fee parameters. Uniswap V3, Orca Whirlpool, and Meteora DLMM
+use **concentrated liquidity**, where each LP picks a price range; the
+math reduces to constant-product *within* a price tick and re-balances
+on tick crossings. The tool treats them all as V2 because the cross-
+tick details require per-pool state — the V2 estimate is conservative
+(it under-estimates impact when the curve crosses a tick), which is the
+right direction for a risk screen.
+
+### Perpetual futures ("perps")
+
+A derivative contract that tracks the spot price of an asset but never
+expires. Long if you think the asset goes up, short if you think it
+goes down. Because there's no expiry to settle against, exchanges use
+**funding rates** to keep the perp's price close to spot — see below.
+
+The price you trade against on the exchange is the **mark price**, a
+funding-adjusted index designed to resist manipulation by a single bad
+print. The **index price** is the weighted spot average across several
+venues. The **last price** is the most recent fill — useful for charts
+but a bad trigger for stops, since it can be wicked.
+
+### Funding rate
+
+A periodic payment between the long and short sides of a perpetual. If
+the perp trades above spot (positive basis), longs pay shorts; if it
+trades below (negative basis), shorts pay longs. The payment is sized
+to converge the perp back to spot. Funding is paid every cycle:
+
+| Venue | Cycle |
+|---|---|
+| Kraken Futures | 1 hour (absolute USD/contract/hour units) |
+| Binance, Bybit, OKX | 8 hours |
+| Deribit, BitMEX | 8 hours |
+| Hyperliquid | 1 hour |
+
+memecheck normalises everything to **percent per 8h** so a single
+number is comparable across venues, regardless of native cycle length.
+For Kraken, the conversion is
+
+$$\text{pct}_{8h} = \frac{\text{absolute rate}}{\text{mark}} \cdot 8 \cdot 100$$
+
+For Hyperliquid (which already publishes a relative per-hour rate),
+
+$$\text{pct}_{8h} = \text{rate} \cdot 8 \cdot 100$$
+
+**Sign convention is universal**: positive funding means longs pay
+shorts, negative means shorts pay longs. A short with negative funding
+is paying out of pocket every cycle; a long with negative funding is
+collecting.
+
+### Open interest (OI)
+
+The total notional value of all open perpetual positions on a contract.
+Rising OI with rising price means new longs are entering (bullish
+positioning). Falling OI in either direction usually means positions
+are *closing* — sometimes voluntarily, sometimes via liquidation. A
+sudden 20%+ drop in OI is the canonical signature of a liquidation
+cascade or a cohort of leveraged shorts getting force-closed.
+
+### Basis (perp premium / discount)
+
+The percentage difference between the perp's mark price and the spot
+index:
+
+$$\text{basis} = \frac{\text{mark} - \text{index}}{\text{index}} \cdot 100\%$$
+
+A positive basis ("premium") usually means leveraged longs are aggressive;
+a negative basis ("discount") means leveraged shorts. Sustained basis
+above ~0.5% is rare on a deep perp and usually collapses violently
+within minutes — that's why `cex-check` flags it.
+
+### Isolated vs cross margin
+
+Two modes for how exchanges treat collateral.
+
+- **Isolated margin.** Each position has its own dedicated chunk of
+  collateral. If the position is liquidated, you lose that chunk
+  exactly — never more.
+- **Cross margin.** All positions share the futures wallet as collateral.
+  Lower margin requirements (a winning position can subsidise a losing
+  one), but a single cascade can liquidate *all* your positions.
+
+The planner's liquidation calculation assumes **isolated**. Use
+isolated for any high-volatility or low-conviction trade — the worst
+case is bounded.
+
+### Liquidation & maintenance margin
+
+Your position is liquidated when your remaining collateral falls below
+the exchange's **maintenance-margin requirement (MMR)** for that
+position. For an isolated long at leverage $L$ with MMR $m$, the price
+at which this happens is approximately
+
+$$P_\text{liq} \approx P_\text{entry} \cdot \left(1 - \frac{1}{L} + m\right)$$
+
+For a short, the sign in front of $1/L$ flips. Real exchanges use
+*tiered* MMR — bigger positions need a higher $m$ — which means your
+real liquidation is closer to entry than this formula suggests once
+your notional is large. The calculator uses a constant $m = 0.005$
+(0.5%) and the planner's safety check warns you when the stop sits
+within 70% of the (constant-MMR) liquidation distance.
+
+### Auto-deleveraging (ADL)
+
+When a liquidation cascade overruns the exchange's insurance fund, the
+exchange force-closes *profitable* positions on the opposite side at
+the bankruptcy price to make the insurance fund whole. Your winning
+position can be closed at a worse price than your TP. ADL queue
+position is published by most CEXes and roughly tracks "how big and
+how profitable is your position relative to others on this side."
+Reduce size before known event-day risk to lower ADL exposure.
+
+### MEV and sandwich attacks
+
+On EVM chains, the public mempool lets searchers see pending swaps
+before they're confirmed. A sandwich attack puts a buy *before* your
+buy (driving price up) and a sell *after* your buy (taking the gain).
+Mitigation: set tight slippage tolerance on the router, use private
+mempool services (Flashbots Protect, MEV-Share), or batch through a
+solver-based aggregator that gives MEV protection.
+
+### R-multiples and position sizing
+
+If you risk dollar amount $R$ on a trade with a stop at distance $d_\text{sl}$
+percent below entry, then by definition the position notional must be
+
+$$N = \frac{R}{d_\text{sl} / 100}$$
+
+so that hitting the stop loses exactly $R$. Every take-profit target
+is then expressed in *multiples of R*: a 2R TP means a position closed
+there nets $2R$ minus fees and funding. Long-run profitability requires
+
+$$E[\text{trade}] = p_w \cdot \overline{k_w} - p_l \cdot 1 > 0$$
+
+so on a typical 35–50% win rate the average winner has to be at least
+2R. The planner shows 1R / 2R / 3R as default targets because below
+1.5R you're basically a coinflip after costs.
+
+### Debounce (in the decision engine)
+
+A counter that increments while a rule's condition holds and resets to
+zero when it stops. A rule "with debounce N" fires only when the
+counter reaches N — i.e. when the condition has been true for N
+consecutive ticks. Used to suppress one-tick noise spikes that would
+otherwise fire ALERT on a single bad polled sample. The slow-bleed
+rule has the highest debounce (6 ticks ≈ 30 seconds of sustained
+decline) because slow rugs are rarely a one-tick event.
+
+### Price impact vs round-trip slippage
+
+Two different things the user can ask about a buy:
+
+- **Price impact** is how much higher than the displayed marginal
+  price you *actually pay* on the buy, due to walking the curve. Grows
+  monotonically with trade size relative to pool depth. This is the
+  meaningful warning signal for "is this pool too thin for my buy?"
+- **Round-trip slippage** is what you'd lose buying and immediately
+  re-selling at the new pool state. On a constant-product AMM with fee
+  $f$, this is bounded by approximately $2f$ regardless of trade size,
+  because the fee stays in the pool and is partially recovered on the
+  re-sell.
+
+`scan --buy-size` reports both, but flags only on price impact —
+because round-trip on a V2 AMM is structurally bounded and can't tell a
+healthy pool from a thin one.
+
+## How the thresholds are calibrated
+
+Every magic number in the codebase is a named constant near the top of
+its module, so anyone can grep for them and override them via
+`DecisionConfig` or a CLI flag. Here's what each one *expresses*:
+
+| Constant | Value | What it expresses |
+|---|---|---|
+| `THIN_LIQ_USD` | $20,000 | The level below which a $50–100 retail buy moves the price >1% by itself. |
+| `LOW_LIQ_MC_RATIO` | 0.03 | The boundary between "tradeable float" and "tiny float propping up a big nominal valuation." Most legit memecoins sit between 0.03 and 0.10. |
+| `WASH_VOL_LIQ_RATIO` | 50× | Healthy organic trading rarely turns the pool over more than 50 times in 24h. |
+| `DEAD_VOL_LIQ_RATIO` | 0.05× | Below this, the token isn't really trading. Gated to liquidity under $2M to avoid mis-firing on multi-pool mega-caps that DexScreener under-counts. |
+| `HARD_PASS_FLAG_COUNT` | 4 | The point at which the cumulative weight of issues makes "RISKY" feel dishonest. Three is "messy"; four is "the deck is stacked." |
+| `EXIT_SLIPPAGE_FLAG_PCT` / `_SEVERE` | 5% / 20% | A 5% price-impact buy is bearable on a 1R-or-better thesis; 20% means a quarter of the alpha is already eaten by the curve before the chart moves. |
+| `critical_liq_ratio` | 0.5 | The canonical "this is a rug in progress" threshold in DeFi research. Half the liquidity gone vs your `L_0` baseline. |
+| `large_event_pct` (10 s window) | −20% | Smaller drops happen in normal memecoin volatility; −20% in 10 seconds is essentially always a partial pull or aggressive distribution. |
+| `slow_bleed_60s_pct` / `slow_bleed_300s_pct` | −10% / −15% | A coordinated decay slow enough to dodge the large-event rule but persistent enough that both the 60-second and 5-minute windows agree something is wrong. |
+| `slow_bleed_debounce` | 6 ticks | About 30 seconds at the default 5s cadence. Below this, one bad poll can fire; above this, the rule misses real slow rugs. |
+| `EXTREME_FUNDING_PER_8H_PCT` | 0.05% | Annualises to ~55% APY. Sustained funding above this is almost always mean-reversion-prone within hours. |
+| `BASIS_BLOWOUT_PCT` | 0.5% | The level above which a perp has noticeably decoupled from index. Convergence almost always happens via a violent unwind. |
+
+These are calibrated defaults, not optimum values. The point of putting
+them in named constants is that the backtest harness lets you replay
+historical tapes with different settings and see what changes.
+
+## Engineering choices
+
+### The watch loop is REST-polling
+
+Both `watch` and `cex-watch` poll their data source on an interval
+(default 5s for DEX, 30s for CEX) rather than maintaining a persistent
+websocket subscription. Mechanically this means:
+
+- One synchronous `urllib.request.urlopen` per tick, run in the asyncio
+  default executor so the main loop isn't blocked.
+- The source object stores no connection state — every tick is fresh,
+  so transient errors recover automatically on the next tick.
+- A dead poll (HTTP 503, JSON decode failure, missing fields) increments
+  an error counter, calls the `on_error` callback, and yields nothing
+  for that tick. The loop keeps going.
+
+The cost compared to websockets: 5–30 second latency on detection
+instead of sub-second. The benefit: no paid RPC required, no
+reconnection logic, no dropped-subscription edge cases, and every
+chain DexScreener indexes works for free. For the design goal — catch
+slow bleeds and notify the user fast enough to react manually — 5
+seconds is more than sufficient.
+
+### Funding cost respects trade side
+
+The planner computes funding as a **cost to the trader**, signed so
+that positive means outflow and negative means inflow. The mechanism
+is:
+
+$$\text{funding signed} = N \cdot \frac{r}{100} \cdot \text{cycles}$$
+
+$$\text{cost}_{\text{long}} = +\text{funding signed} \qquad \text{cost}_{\text{short}} = -\text{funding signed}$$
+
+In words: positive funding $r$ means longs pay shorts. A long *pays*
+that amount (positive cost). A short *receives* it (negative cost).
+For negative funding the relationship flips. The simple
+`net = gross - fee - cost` formula then works for both sides without
+any sign tricks at the call site.
+
+The XRP example: shorts paying $-0.014\%$ per 8h while you hold for
+72 hours (9 cycles) on a $290 position gives
+
+$$\text{cost} = -\left( 290 \cdot \frac{-0.014}{100} \cdot 9 \right) = +\$0.37$$
+
+so a 1R short of $10 nets $\$10 - \$0.29 - \$0.37 = \$9.34$, not the
+$10.08 the old (sign-bug) version reported.
+
+### Stdlib-only runtime
+
+Zero third-party runtime dependencies. The async monitor uses
+`urllib.request` via `asyncio.run_in_executor` instead of `httpx`. The
+CEX ticker fetch uses raw `urllib.request` with a hand-rolled JSON POST
+instead of `requests`. The trade journal uses stdlib `sqlite3`. The
+audit log uses plain text I/O.
+
+Tradeoffs:
+
+- ~20 lines more boilerplate per module compared to `httpx` or
+  `requests`.
+- No connection pooling, so high-frequency parallel calls would benefit
+  from `httpx` — but the polling loops here are sequential by design.
+- In exchange: `pip install memecheck` works with nothing else
+  installed, no version conflicts, no transitive supply-chain risk,
+  smaller install size, faster `pip install`, and trivially provable
+  "this code didn't import anything that could phone home."
+
+The constraint also forced cleaner interfaces — every module is
+testable in isolation because there's no shared third-party state to
+mock around.
+
+### Dynamic source dispatch
+
+`fetch_funding_rate` resolves its source functions by *name* at call
+time, not by reference at import time:
+
+```python
+_SOURCE_NAMES = ("fetch_kraken_funding", "fetch_hyperliquid_funding")
+
+def fetch_funding_rate(symbol):
+    module = sys.modules[__name__]
+    for name in _SOURCE_NAMES:
+        fetcher = getattr(module, name)
+        result = fetcher(symbol)
+        if result is not None:
+            return result
+    return None
+```
+
+The mechanism matters in tests: `monkeypatch.setattr(funding_mod,
+"fetch_hyperliquid_funding", ...)` only affects future attribute
+lookups on the module, not function references that were captured into
+a tuple at import time. Dynamic lookup makes each source individually
+patchable without leaking test machinery into production code.
+
+### Scope: no auto-execute
+
+The `prep` and `cex-prep` workflows stop at the planning stage. They
+print the position you'd take, but nothing in the codebase signs or
+sends a transaction. The architecture supports a future `--execute`
+flag (the alert dispatcher is shaped the same as a hypothetical
+execute dispatcher would be), but adding it requires:
+
+- A wallet-isolation strategy (burner key in env, never in repo)
+- A swap router (Jupiter on Solana, 1inch on EVM)
+- An MEV-protected send (Jito on Solana, Flashbots on EVM)
+- A kill switch (file-based or signal-based)
+
+The current scope is "tell the user what they should do" rather than
+"do it for them." That's intentional and aligned with the project's
+target use case: a person who wants to make better trades, not an
+operator running a bot at scale.
+
+## Domain assumptions
+
+Things explicitly outside the model, so anyone using the output as
+input to a real decision knows where the math stops:
+
+- **DexScreener under-reports volume on multi-pool mega-caps.** The
+  token endpoint sometimes misses pools; the "dead volume" flag is
+  gated to liquidity under $2M to avoid false positives on large
+  tokens. Eyeball the chart before trusting that flag.
+- **CEX MMR is tiered.** The liquidation formula uses a constant
+  maintenance margin. Real exchanges bump MMR at higher position
+  sizes, so your real liquidation is closer to entry than the
+  calculator shows for large notionals. Pull the exchange's tier table
+  for big positions.
+- **Stop fills slip.** The planner uses the mid-price as the realised
+  fill price. Real stop-market fills slip — especially on weekends and
+  on thin-book CEX perps. Assume 0.5–1× ATR of additional slippage on
+  volatile assets.
+- **ADL on CEX perps isn't modelled.** Your winning TP can be force-
+  closed at bankruptcy price during a cascade.
+- **Funding is assumed constant over the hold window.** It can flip
+  sign during volatile events. For long holds, bake in a buffer.
+- **Smart-contract risk beyond honeypot.is.** Honeypot.is catches most
+  malicious selling logic; it doesn't detect proxy-pattern abuse,
+  governance attacks, oracle manipulation, MEV exposure, or bridge
+  risk. The tool is not a code audit.
+- **MEV / sandwich attacks** on DEX trades are out of scope. Mitigate
+  at the router by setting tight slippage tolerance.
+- **Concentrated-liquidity AMMs** are approximated as constant-product
+  V2. The estimate under-states impact when the trade crosses ticks —
+  conservative in the right direction.
+
+## Built with AI assistance
+
+Code generation, refactoring, and most of the test scaffolding were
+done in collaboration with [Claude](https://claude.ai). The original
+~350-line `memecheck.py` and every product/design decision in the
+codebase came from the human author. By mid-2026, this is how most
+working engineering teams ship — the interesting evaluation axis is
+"does the maintainer understand and own the artifact" rather than
+"who typed each character." This README's design notes section is the
+maintainer's answer to that question.
+
 ## Limitations and caveats
 
 - **The DexScreener token endpoint can under-count 24h volume** on large
