@@ -3,13 +3,30 @@
 [![tests](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml/badge.svg)](https://github.com/Guannings/on-chain-risk-screener/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![dependencies](https://img.shields.io/badge/runtime%20deps-0-success)
+![mypy](https://img.shields.io/badge/mypy-checked-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![last commit](https://img.shields.io/github/last-commit/Guannings/on-chain-risk-screener)
 
-> **Catch the rug before it pulls.** A zero-dependency Python CLI that screens
-> any Solana or EVM token in under three seconds by aggregating three live
-> public sources — DexScreener, RugCheck, and honeypot.is — into a deterministic
-> red-flag verdict.
+> **Crypto risk toolkit.** A zero-dependency Python CLI that screens
+> on-chain tokens *and* CEX perpetuals before you buy, sizes the position
+> against your risk budget, and monitors it in real time after entry — all
+> on a single command surface. Designed to keep you from buying the
+> unsellable and over-sizing the survivable.
+
+## What's in the box
+
+The repo covers two halves of the crypto-trading risk landscape under one
+binary. Pick the column that matches the trade you're about to make:
+
+|                    | **On-chain DEX** (Raydium, Uniswap, etc.) | **CEX perpetual** (Kraken Futures, Hyperliquid) |
+|--------------------|-------------------------------------------|--------------------------------------------------|
+| **Pre-trade screen** | `scan <ADDR>` | `cex-check <SYMBOL>` |
+| **Composed entry workflow** | `prep <ADDR>` (scan + plan, gated) | `cex-prep <SYMBOL>` (cex-check + plan, gated) |
+| **Real-time monitor** | `watch <ADDR>` | `cex-watch <SYMBOL>` |
+| **Position math** | `plan` (sizing, R-multiples, TPs, fees, funding, liquidation safety) — works for both |
+| **Liquidation calculator** | `calc --liq P --lev L` — venue-agnostic |
+| **Backtest harness** | `backtest <tape.csv>` — replays a tape through the decision engine, reports precision/recall vs labels |
+| **Trade journal** | `journal` — auto-logged history of every `prep` / `cex-prep` run |
 
 <p align="center">
   <img src="assets/architecture.svg" alt="memecheck architecture: one token address fans out to DexScreener, RugCheck, and honeypot.is, then into a threshold analyzer that emits flags, a verdict, and an exit code." width="780">
@@ -114,7 +131,7 @@ liquidity is never summed across different deployments of the same address.
 
 ## Command reference
 
-Three subcommands. Everything else is a flag.
+Subcommands grouped by lifecycle. Everything else is a flag.
 
 ### `scan` — one-shot pre-trade check
 
@@ -146,6 +163,62 @@ Stops on `Ctrl+C`. See [the watch section below](#real-time-monitor-watch) for
 the decision rules, the audit log format, and the optional push-notification
 channels.
 
+### `prep` — composed DEX pre-entry workflow
+
+```bash
+memecheck prep <ADDRESS> --account 1000 --entry 0.0001 --stop 0.000094
+memecheck prep <ADDRESS> --account 1000 --entry 0.0001 --stop 0.000094 --leverage 5
+memecheck prep <ADDRESS> --account 1000 --entry 0.0001 --stop 0.000094 --force
+```
+
+Runs `scan` and `plan` together. Plan's computed notional is fed into
+scan's exit-sim so the price-impact check runs at your real size.
+Refuses to print the plan if scan returns `HONEYPOT` or `HARD PASS`
+(`--force` to override). Not a trading bot.
+
+### `cex-check` — CEX perp pre-trade screen
+
+```bash
+memecheck cex-check XRP                             # screen the XRP perp
+memecheck cex-check XRP --side short                # add funding-direction analysis
+memecheck cex-check BTC --json
+```
+
+Pulls a live ticker from Kraken Futures and checks funding magnitude,
+mark-vs-index basis, 24h volume, bid-ask spread, and 24h price move.
+
+### `cex-prep` — composed CEX pre-entry workflow
+
+```bash
+memecheck cex-prep XRP --account 1000 --entry 1.16 --stop 1.20 --leverage 5
+memecheck cex-prep BTC --account 5000 --entry 64500 --stop 63000 --hold-hours 72
+```
+
+`cex-check` + `plan`, gated on `HARD PASS` like `prep`. Funding rate
+auto-fetched from the same ticker call.
+
+### `cex-watch` — real-time CEX perp monitor
+
+```bash
+memecheck cex-watch XRP                             # default 30s poll
+memecheck cex-watch XRP --interval 10 --max-ticks 60
+memecheck cex-watch BTC --side long                 # alert on long-side funding spikes
+```
+
+Polls Kraken Futures every N seconds; alerts on funding extremes,
+basis blowouts, and OI drops via the same dispatcher as `watch`.
+
+### `plan` — position sizing / R-multiples (no network)
+
+```bash
+memecheck plan --account 1000 --entry 100 --stop 96
+memecheck plan --account 1000 --entry 1.16 --stop 1.20 --leverage 5 --symbol XRP
+memecheck plan --account 1000 --entry 100 --stop 96 --tp 1 --tp 2 --tp 4
+```
+
+Pass `--symbol <TICKER>` to auto-fetch funding from Kraken Futures
+(falls back to Hyperliquid). Explicit `--funding +0.05` overrides.
+
 ### `calc` — liquidation-price calculator
 
 ```bash
@@ -153,8 +226,30 @@ memecheck calc --liq 0.0000123 --lev 10             # both required
 memecheck calc --liq 0.5 --lev 5 --json             # JSON output
 ```
 
-See [the liquidation calculator section below](#liquidation-price-calculator)
-for the math.
+### `backtest` — replay a tape against the decision engine
+
+```bash
+memecheck backtest tape.csv                         # report Decider actions per tick
+memecheck backtest tape.csv --labels labels.csv     # add precision/recall vs ground truth
+memecheck backtest tape.csv --critical-ratio 0.4    # override threshold
+```
+
+CSV format: `timestamp,liquidity_usd,price_usd`. Labels CSV:
+`timestamp,event` where event is one of `rug`, `migration`, `none`.
+Four synthetic tapes ship in `samples/` for immediate use.
+
+### `journal` — trade-prep history
+
+```bash
+memecheck journal                                   # last 20 entries
+memecheck journal --last 50
+memecheck journal --symbol XRP                      # filter
+memecheck journal --json
+```
+
+Every `prep` and `cex-prep` call auto-logs verdict, planned notional,
+and timestamp to `~/.memecheck/journal.sqlite` so you can close the
+feedback loop between *what the tool said* and *what happened*.
 
 ### Backward-compatible invocations
 

@@ -19,7 +19,11 @@ from typing import Any, Optional
 from memecheck.common.liquidation import liq_report, liq_report_dict
 from memecheck.scanner.runner import run_token
 
-_SUBCOMMANDS = {"scan", "watch", "calc", "plan", "prep", "cex-check", "cex-prep"}
+_SUBCOMMANDS = {
+    "scan", "watch", "calc", "plan", "prep",
+    "cex-check", "cex-prep", "cex-watch",
+    "journal", "backtest",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -290,6 +294,96 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
 
+    # ---- cex-watch -------------------------------------------------------
+    cex_watch = sub.add_parser(
+        "cex-watch",
+        help="real-time monitor for a CEX perp (funding, basis, OI)",
+        description=(
+            "Polls Kraken Futures every INTERVAL seconds and alerts on "
+            "funding spikes, basis blowouts, and sudden OI drops. Same "
+            "alert dispatcher as `watch` — Telegram / Discord / ntfy "
+            "env-gated."
+        ),
+    )
+    cex_watch.add_argument("symbol", help="CEX perp ticker (e.g. XRP, BTC)")
+    cex_watch.add_argument(
+        "--side", choices=["long", "short"], default=None,
+        help="trade side for funding-direction analysis (optional)",
+    )
+    cex_watch.add_argument(
+        "--interval", type=float, default=30.0,
+        help="poll cadence in seconds (default 30)",
+    )
+    cex_watch.add_argument(
+        "--max-ticks", type=int, default=None, dest="max_ticks",
+        help="stop after this many ticks (default: run until Ctrl+C)",
+    )
+    cex_watch.add_argument(
+        "--no-audit", dest="no_audit", action="store_true",
+        help="disable the JSONL audit log",
+    )
+    cex_watch.add_argument(
+        "--audit-dir", dest="audit_dir", default=None,
+        help="directory for the audit log (default ./audit)",
+    )
+
+    # ---- journal --------------------------------------------------------
+    journal = sub.add_parser(
+        "journal",
+        help="view past prep / cex-prep runs from the trade journal",
+        description=(
+            "List entries from the SQLite trade journal (default "
+            "~/.memecheck/journal.sqlite). Every `prep` and `cex-prep` "
+            "run auto-logs verdict, planned notional, and timestamps."
+        ),
+    )
+    journal.add_argument(
+        "--last", type=int, default=20, dest="last_n",
+        help="show the most recent N entries (default 20)",
+    )
+    journal.add_argument(
+        "--symbol", default=None,
+        help="filter to a specific symbol or address",
+    )
+    journal.add_argument(
+        "--venue", choices=["dex", "cex"], default=None,
+        help="filter to DEX or CEX entries",
+    )
+    journal.add_argument(
+        "--path", default=None,
+        help="override journal database path",
+    )
+    journal.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
+    # ---- backtest -------------------------------------------------------
+    backtest = sub.add_parser(
+        "backtest",
+        help="replay a tape against the decision engine",
+        description=(
+            "Take a CSV tape of (timestamp, liquidity_usd, price_usd), "
+            "feed it into the Decider, and report what actions the rules "
+            "would have fired. Optionally compare against labels for "
+            "precision / recall on rug detection."
+        ),
+    )
+    backtest.add_argument("tape", help="path to CSV tape file")
+    backtest.add_argument(
+        "--labels", default=None,
+        help="optional path to ground-truth labels CSV "
+             "(format: timestamp,event where event ∈ rug|migration|none)",
+    )
+    backtest.add_argument(
+        "--critical-ratio", type=float, default=None, dest="critical_ratio",
+        help="override critical_liq_ratio threshold",
+    )
+    backtest.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
     return parser
 
 
@@ -511,11 +605,12 @@ def _run_prep(args: argparse.Namespace) -> int:
             },
         }
         if not refuse:
-            out["plan"] = plan_to_dict(plan)
+            plan_dict: dict[str, Any] = plan_to_dict(plan)
             if funding_note or funding_extra:
-                out["plan"]["funding_resolution"] = {
+                plan_dict["funding_resolution"] = {
                     "note": funding_note, **funding_extra
                 }
+            out["plan"] = plan_dict
         print(json.dumps(out, indent=2, default=str))
         return _combined_exit_code(scan_exit, plan, refuse)
 
@@ -557,7 +652,106 @@ def _run_prep(args: argparse.Namespace) -> int:
     if funding_note:
         print(f"  ↻ {funding_note}")
     print(format_plan(plan))
+    _log_journal_safely(
+        venue="dex",
+        symbol_or_addr=args.address.strip(),
+        side=plan.side,
+        account_usd=args.account,
+        entry_price=args.entry,
+        stop_price=args.stop,
+        leverage=plan.leverage_used,
+        position_notional_usd=plan.position_notional_usd,
+        risk_usd=plan.dollar_risk_usd,
+        verdict=verdict,
+        refused=False,
+        forced=bool(is_honeypot or is_hard_pass),
+        funding_per_8h_pct=funding_pct,
+        notes=None,
+    )
     return _combined_exit_code(scan_exit, plan, refuse=False)
+
+
+def _log_journal_safely(**kwargs: Any) -> None:
+    """Best-effort journal write — never crash a `prep` run because the
+    journal write failed."""
+    try:
+        from memecheck.common.journal import log_entry
+        log_entry(**kwargs)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_cex_watch(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from memecheck.monitor.cex_runner import run_cex_watch_cli
+    audit_dir = Path(args.audit_dir) if args.audit_dir else None
+    return run_cex_watch_cli(
+        symbol=args.symbol,
+        side=args.side,
+        interval=args.interval,
+        max_ticks=args.max_ticks,
+        audit_enabled=not args.no_audit,
+        audit_dir=audit_dir,
+    )
+
+
+def _run_journal(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from memecheck.common.journal import list_entries
+    p = Path(args.path) if args.path else None
+    entries = list_entries(
+        limit=args.last_n,
+        symbol_or_addr=args.symbol,
+        venue=args.venue,
+        path=p,
+    )
+    if args.as_json:
+        print(json.dumps(
+            [{
+                "id": e.id, "iso_ts": e.iso_ts, "venue": e.venue,
+                "symbol_or_addr": e.symbol_or_addr, "side": e.side,
+                "account_usd": e.account_usd, "entry_price": e.entry_price,
+                "stop_price": e.stop_price, "leverage": e.leverage,
+                "position_notional_usd": e.position_notional_usd,
+                "risk_usd": e.risk_usd, "verdict": e.verdict,
+                "refused": e.refused, "forced": e.forced,
+                "funding_per_8h_pct": e.funding_per_8h_pct, "notes": e.notes,
+            } for e in entries],
+            indent=2, default=str,
+        ))
+        return 0
+    if not entries:
+        print("(no journal entries yet — run `prep` or `cex-prep` to create some)")
+        return 0
+    print(f"\n########## memecheck journal — last {len(entries)} entry/entries ##########")
+    print()
+    print(
+        f" {'id':>4s} │ {'when (UTC)':>19s} │ {'venue':>5s} │ "
+        f"{'symbol':>12s} │ {'side':>5s} │ {'notional':>10s} │ "
+        f"{'verdict':>12s} │ refused"
+    )
+    print("─" * 110)
+    for e in entries:
+        short_when = e.iso_ts[:19]
+        short_sym = (e.symbol_or_addr[:10] + "…") if len(e.symbol_or_addr) > 12 else e.symbol_or_addr
+        verdict_short = (e.verdict or "")[:12]
+        print(
+            f" {e.id:>4d} │ {short_when:>19s} │ {e.venue:>5s} │ "
+            f"{short_sym:>12s} │ {(e.side or '?'):>5s} │ "
+            f"${e.position_notional_usd:>9,.2f} │ "
+            f"{verdict_short:>12s} │ {'yes' if e.refused else 'no'}"
+        )
+    return 0
+
+
+def _run_backtest(args: argparse.Namespace) -> int:
+    from memecheck.common.backtest import run_backtest_cli
+    return run_backtest_cli(
+        tape_path=args.tape,
+        labels_path=args.labels,
+        critical_ratio_override=args.critical_ratio,
+        as_json=args.as_json,
+    )
 
 
 def _combined_exit_code(scan_exit: int, plan: Any, refuse: bool) -> int:
@@ -760,6 +954,22 @@ def _run_cex_prep(args: argparse.Namespace) -> int:
         f"{funding_pct:+.4f}% per 8h"
     )
     print(format_plan(plan))
+    _log_journal_safely(
+        venue="cex",
+        symbol_or_addr=args.symbol.upper(),
+        side=side,
+        account_usd=args.account,
+        entry_price=args.entry,
+        stop_price=args.stop,
+        leverage=plan.leverage_used,
+        position_notional_usd=plan.position_notional_usd,
+        risk_usd=plan.dollar_risk_usd,
+        verdict=verdict,
+        refused=False,
+        forced=bool(is_hard_pass),
+        funding_per_8h_pct=funding_pct,
+        notes=None,
+    )
     return _combined_exit_code(exit_code_for_cex(verdict), plan, refuse=False)
 
 
@@ -837,6 +1047,21 @@ WHAT IT DOES
        Example:
          memecheck cex-prep XRP --account 1000 --entry 1.16 --stop 1.20
 
+  {b}cex-watch <SYMBOL>{r}     CEX perp REAL-TIME monitor.
+       Polls Kraken Futures, alerts on funding extremes, basis
+       blowouts, OI drops. Same alert dispatcher as `watch`.
+
+       Example:
+         memecheck cex-watch XRP --side short --interval 30
+
+  {b}journal{r}                Your trade-prep history.
+       Every prep / cex-prep auto-logs to ~/.memecheck/journal.sqlite.
+       `memecheck journal` shows the last 20 entries.
+
+  {b}backtest <tape.csv>{r}    Replay a tape against the decision engine.
+       Reports actions taken and (with --labels) precision/recall
+       on rug detection. Samples in samples/ to try immediately.
+
 WHAT IT IS NOT
   - Not financial advice.
   - Not a trading bot — it does not sign or send transactions.
@@ -891,6 +1116,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(_run_cex_check(args))
     elif args.cmd == "cex-prep":
         sys.exit(_run_cex_prep(args))
+    elif args.cmd == "cex-watch":
+        sys.exit(_run_cex_watch(args))
+    elif args.cmd == "journal":
+        sys.exit(_run_journal(args))
+    elif args.cmd == "backtest":
+        sys.exit(_run_backtest(args))
     else:
         _print_menu()
         sys.exit(0)

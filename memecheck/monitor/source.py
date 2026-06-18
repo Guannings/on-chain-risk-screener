@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from memecheck.common.http import get_json
 from memecheck.common.liquidity_math import derive_reserves
@@ -99,8 +99,10 @@ def _event_from_pair(pair: dict[str, Any], pool: _ResolvedPool) -> Optional[Liqu
     if derived is None:
         return None
     base_r, quote_r, qp_usd = derived
+    price_usd_raw = pair.get("priceUsd")
+    price_usd: Optional[float]
     try:
-        price_usd = float(pair.get("priceUsd")) if pair.get("priceUsd") is not None else None
+        price_usd = float(price_usd_raw) if price_usd_raw is not None else None
     except (TypeError, ValueError):
         price_usd = None
     if price_usd is None:
@@ -141,7 +143,7 @@ class DexScreenerPollSource(LiquiditySource):
         addr: str,
         interval_seconds: float = 5.0,
         forced_chain: Optional[str] = None,
-        on_error: Optional[callable] = None,
+        on_error: Optional[Callable[[str], None]] = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")

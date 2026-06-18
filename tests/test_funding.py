@@ -132,8 +132,36 @@ def test_fetch_funding_rate_empty_symbol() -> None:
 
 
 def test_fetch_funding_rate_returns_none_if_no_source_has_it(monkeypatch) -> None:
+    # Disable both sources so we test the dispatcher's "all returned None" path.
     monkeypatch.setattr(
         funding_mod, "get_json",
         lambda url, timeout=15: {"tickers": []},
     )
+    monkeypatch.setattr(
+        funding_mod, "fetch_hyperliquid_funding",
+        lambda symbol: None,
+    )
     assert fetch_funding_rate("XRP") is None
+
+
+def test_hyperliquid_funding_is_fallback_when_kraken_misses(monkeypatch) -> None:
+    """If Kraken doesn't list a symbol, the dispatcher tries Hyperliquid."""
+    # Kraken returns nothing.
+    monkeypatch.setattr(
+        funding_mod, "get_json",
+        lambda url, timeout=15: {"tickers": []},
+    )
+    # Hyperliquid returns a fabricated result.
+    from memecheck.common.funding import FundingRateResult
+    fake_hl = FundingRateResult(
+        symbol="HYPE", rate_per_8h_pct=0.05,
+        raw_rate=6.25e-6, raw_unit="decimal per hour (relative)",
+        source="hyperliquid", mark_price=10.0, perp_symbol="HYPE",
+    )
+    monkeypatch.setattr(
+        funding_mod, "fetch_hyperliquid_funding",
+        lambda symbol: fake_hl if symbol.upper() == "HYPE" else None,
+    )
+    r = fetch_funding_rate("HYPE")
+    assert r is not None
+    assert r.source == "hyperliquid"

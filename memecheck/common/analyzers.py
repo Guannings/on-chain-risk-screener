@@ -45,8 +45,10 @@ def analyze_dexscreener(
         None,
     )
     # true age = earliest pool creation across all pools
-    created = [p.get("pairCreatedAt") for p in pairs if p.get("pairCreatedAt")]
-    created_ms = min(created) if created else None
+    created: list[int] = [
+        int(p["pairCreatedAt"]) for p in pairs if p.get("pairCreatedAt")
+    ]
+    created_ms: Optional[int] = min(created) if created else None
 
     age_hours: Optional[float] = None
     if created_ms:

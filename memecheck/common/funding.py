@@ -107,17 +107,91 @@ def fetch_kraken_funding(symbol: str) -> Optional[FundingRateResult]:
     return None
 
 
+# ----------------------------- Hyperliquid (DEX perp) -------------------
+
+# Hyperliquid's /info endpoint with type=metaAndAssetCtxs returns
+# [meta, ctxs] where meta.universe[i] has the symbol and ctxs[i].funding
+# is the decimal rate per HOUR (already relative to mark). Conversion to
+# per-8h percent is just × 8 × 100.
+
+import json as _json
+import urllib.error as _urllib_error
+import urllib.request as _urllib_request
+
+
+def fetch_hyperliquid_funding(symbol: str) -> Optional[FundingRateResult]:
+    """Pull funding rate from Hyperliquid's public API.
+
+    Useful as a fallback when a symbol isn't listed on Kraken Futures —
+    Hyperliquid lists many newer perpetuals that CEXes haven't picked up.
+    Returns None if the symbol isn't in their universe or the fetch fails.
+    """
+    canon = symbol.upper().lstrip("$")
+    body = _json.dumps({"type": "metaAndAssetCtxs"}).encode("utf-8")
+    req = _urllib_request.Request(
+        "https://api.hyperliquid.xyz/info",
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "memecheck/0.5"},
+        method="POST",
+    )
+    try:
+        with _urllib_request.urlopen(req, timeout=15) as r:
+            data = _json.loads(r.read().decode("utf-8"))
+    except (_urllib_error.HTTPError, Exception):
+        return None
+
+    if not isinstance(data, list) or len(data) < 2:
+        return None
+    meta = data[0]
+    ctxs = data[1]
+    universe = (meta or {}).get("universe") or []
+
+    for i, u in enumerate(universe):
+        if (u or {}).get("name") == canon:
+            if i >= len(ctxs):
+                return None
+            ctx = ctxs[i] or {}
+            raw = ctx.get("funding")
+            mark = ctx.get("markPx")
+            if raw is None:
+                return None
+            try:
+                raw_f = float(raw)
+                mark_f = float(mark) if mark is not None else None
+            except (TypeError, ValueError):
+                return None
+            # Hyperliquid's funding is already relative per hour. Convert
+            # to per-8h percent: × 8 × 100.
+            per_8h_pct = raw_f * 8.0 * 100.0
+            return FundingRateResult(
+                symbol=canon,
+                rate_per_8h_pct=per_8h_pct,
+                raw_rate=raw_f,
+                raw_unit="decimal per hour (relative)",
+                source="hyperliquid",
+                mark_price=mark_f,
+                perp_symbol=canon,
+            )
+    return None
+
+
 # ----------------------------- public entry point ------------------------
 
-# Source order — first that returns wins. Add additional non-China venues here.
-_SOURCES = (fetch_kraken_funding,)
+# Source order — names looked up dynamically at call time (NOT captured as
+# function references) so tests can monkeypatch either source individually.
+# Kraken Futures first (deeper books, more liquid for majors); Hyperliquid
+# as fallback for symbols only listed on DEX perps.
+_SOURCE_NAMES: tuple[str, ...] = ("fetch_kraken_funding", "fetch_hyperliquid_funding")
 
 
 def fetch_funding_rate(symbol: str) -> Optional[FundingRateResult]:
     """Try each configured source in order; return the first hit."""
     if not symbol or not symbol.strip():
         return None
-    for fetcher in _SOURCES:
+    import sys as _sys
+    module = _sys.modules[__name__]
+    for name in _SOURCE_NAMES:
+        fetcher = getattr(module, name)
         result = fetcher(symbol)
         if result is not None:
             return result
