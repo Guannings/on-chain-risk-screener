@@ -75,144 +75,87 @@ See the [full command reference](#command-reference) below.
 
 ## Try it on these
 
-The tool auto-detects chain from the address format. Copy-paste any of these to see real output now:
-
-| Token | Address | What you'll see |
-|---|---|---|
-| $WIF (Solana) | `EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm` | Solana path — DexScreener + RugCheck, flags a concentration risk |
-| PEPE (Ethereum) | `0x6982508145454Ce325dDbE47a25d4ec3d2311933` | EVM path — DexScreener + honeypot.is, clean contract |
-| USDC (Solana mint) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Stable reference — clean contract, zero relevant flags |
+Copy-paste any of these to see real live output:
 
 ```bash
-memecheck EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm
-memecheck 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --chain ethereum
-memecheck 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --json | jq '.verdict'
+# DEX side — on-chain token addresses
+memecheck scan EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm   # $WIF on Solana
+memecheck scan 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --chain ethereum   # PEPE on Ethereum
+
+# CEX side — perpetual ticker symbols
+memecheck cex-check XRP --side short
+memecheck cex-check BTC --side long
 ```
 
 > [!IMPORTANT]
 > This is a screening tool, not a trading signal. It surfaces mechanical
-> failure modes — rug pulls, honeypots, dead liquidity, insider concentration —
-> that a buyer can verify before sending funds. It does **not** predict price.
-> **It is not financial advice.** See the full disclaimer at the bottom.
+> failure modes — rug pulls, honeypots, thin pools, crowded funding,
+> basis blowouts — that a buyer can verify before sending funds. It does
+> **not** predict price. **It is not financial advice.** See the full
+> disclaimer at the bottom.
 
-## What each pre-trade screen actually checks
+---
 
-The DEX-side `scan` and the CEX-side `cex-check` are parallel commands
-that ask "is this safe to take?" on their respective venues. Different
-data sources, different risks, same `(flags, notes, verdict)` shape.
+The repo is organised into four explicit parts. Skip to whichever applies
+to the trade you're about to make:
 
-### DEX side (`scan`)
+- **Part 1 — On-chain DEX tokens.** `scan`, `watch`, `prep`, the
+  exit-liquidity simulator. For when you're buying a memecoin on
+  Raydium, Uniswap, pump.fun, etc.
+- **Part 2 — CEX perpetuals.** `cex-check`, `cex-prep`, `cex-watch`.
+  For when you're trading a perp on Kraken Futures, Hyperliquid, or
+  any centralised venue.
+- **Part 3 — Position math and analytics.** `plan`, `calc`,
+  `backtest`, `journal`. Venue-agnostic — works for any trade in
+  either part above.
+- **Part 4 — Under the hood.** Architecture, financial concepts,
+  threshold rationale, engineering choices, what isn't modelled.
 
-Every metric below is aggregated across **every pool for the token on a
-single chain**, so a multi-pool token's depth and volume are not
-under-counted, and liquidity is never summed across different
-deployments of the same address.
+Each part is self-contained. Part 1 doesn't mention CEX; Part 2 doesn't
+mention DEX.
 
-#### Market structure — [DexScreener](https://dexscreener.com) (all chains)
+---
 
-| Check | Why it matters |
-|---|---|
-| Aggregated USD liquidity | Below ~$20k, you are the slippage on exit. |
-| Liq / Market-Cap ratio | A ratio under ~0.03 means a tiny float is propping up a large nominal valuation. Exits move the price violently. |
-| 24h volume / liquidity | Above ~50× hints at wash trading or bot churn. Below ~0.05× (and liquidity under $2M) signals dead interest. The tool intentionally distrusts the "dead" verdict on mega-cap tokens because DexScreener's token endpoint can under-count volume for many-pool assets. |
-| Age (earliest pool) | Tokens under 24 hours old sit in the peak rug-pull window with no track record. |
-| Buys vs sells (24h count) | Sell count above 1.5× buy count is consistent with active distribution. |
+# Part 1 — On-chain DEX tokens
 
-#### Contract authority and holder structure — [RugCheck](https://rugcheck.xyz) (Solana only)
+For tokens on Raydium, Uniswap, pump.fun, and other automated-market-maker
+DEXes. Coverage: Solana + most major EVM chains (auto-detected from the
+address format).
 
-| Check | Why it matters |
-|---|---|
-| Mint authority | If not revoked, the deployer can mint more supply at any time and dilute holders to zero. |
-| Freeze authority | If still active, the deployer can freeze your wallet and block sells. |
-| LP locked / burned % | Below 50% means the deployer can withdraw liquidity (classic rug). |
-| Top-10 holder concentration | Above 50% means one coordinated dump ends the chart. |
-| Insider wallet concentration | Wallets RugCheck flags as insider-controlled holding >15% is a separate, additive risk. |
-| Explicit `risks[]` of level `danger` / `warning` | Surfaced verbatim. |
-
-#### Contract behavior — [honeypot.is](https://honeypot.is) (EVM chains)
-
-| Check | Why it matters |
-|---|---|
-| Honeypot simulation | The contract is simulated end-to-end. If you can buy but the sell function reverts, it's a honeypot. |
-| Buy tax / Sell tax | A sell tax above 10% is the contract skimming you on exit. |
-| Open-source flag | Closed-source contracts can't be reviewed, so any behavior is possible. |
-
-### CEX side (`cex-check`)
-
-Centralised-perpetual checks pulled live from
-[Kraken Futures](https://futures.kraken.com), with optional
-side-aware funding-direction analysis. Run as
-`memecheck cex-check XRP --side short`.
-
-| Check | Why it matters |
-|---|---|
-| Funding magnitude (per 8h) | Annualises to APY. Above ~0.05% per 8h (~55% APY) is "crowded positioning" territory and mean-reversion risk is high. |
-| Funding direction vs side | If you're long and funding is positive (longs pay shorts), it's a daily headwind that your TP target must clear just to break even. Side-aware so the flag only fires when funding works *against* your direction. |
-| Mark-vs-index basis | Perp premium / discount to spot. Sustained gaps above 0.5% almost always collapse via a violent unwind. |
-| 24h volume | Below ~$1M of 24h volume signals a thin order book — stop-fill slippage will be material. |
-| Bid-ask spread | Above ~20 bps means immediate-execution cost is meaningful before any price move. |
-| 24h change | Above ±10% in 24h flags "you're chasing or fading after a violent candle" — statistically a coinflip entry. |
-
-## Supported chains and venues
-
-**DEX (on-chain, scan / watch / prep):**
-
-- **Solana**: full coverage (DexScreener + RugCheck). Auto-detected
-  from a base58 mint address.
-- **EVM**: full coverage (DexScreener + honeypot.is) on Ethereum,
-  BNB Smart Chain, Base, Arbitrum, Polygon, Optimism, and Avalanche.
-  Auto-detected from a `0x…` address. Other EVM chains that
-  DexScreener indexes still get the DexScreener checks; the honeypot
-  check defaults to Ethereum if the chain is unrecognised. Force the
-  chain explicitly with `--chain` (see below).
-
-**CEX (perpetuals, cex-check / cex-prep / cex-watch):**
-
-- **Kraken Futures** is the primary source. Public, no auth, well-
-  documented, non-China-aligned. Any symbol on their `PF_<TICKER>USD`
-  perpetual listing works — BTC, ETH, SOL, XRP, DOGE, AVAX, ADA,
-  and many more.
-- **Hyperliquid** is the fallback for funding-rate auto-fetch when
-  Kraken Futures doesn't list a symbol (typical for newer DEX-perp-
-  only tokens like kPEPE, WIF perps, etc.).
-- `plan` and `calc` are venue-agnostic — the math works for any perp
-  on any exchange.
-
-## Command reference
-
-Subcommands grouped by lifecycle. Everything else is a flag.
+## DEX commands
 
 ### `scan` — one-shot pre-trade check
 
 ```bash
-memecheck scan <ADDRESS>                            # auto-detect chain
-memecheck scan <ADDRESS> --chain ethereum           # force EVM chain
-memecheck scan <ADDRESS> --buy-size 50              # also run exit-sim at $50
-memecheck scan <ADDRESS> --buy-size 50 --max-slippage 3   # 3% impact target
+memecheck scan <ADDRESS>                                  # auto-detect chain
+memecheck scan <ADDRESS> --chain ethereum                 # force EVM chain
+memecheck scan <ADDRESS> --buy-size 50                    # also run exit-sim at $50
+memecheck scan <ADDRESS> --buy-size 50 --max-slippage 3   # 3% price-impact target
 memecheck scan <ADDRESS> --buy-size 50 --fee-bps 100      # override pool fee
-memecheck scan <ADDRESS> --json                     # structured JSON output
-memecheck scan <ADDRESS> --liq 0.0001 --lev 5       # scan + liquidation calc inline
+memecheck scan <ADDRESS> --json                           # structured JSON output
+memecheck scan <ADDRESS> --liq 0.0001 --lev 5             # scan + liquidation calc inline
 ```
 
-`--chain` accepts `ethereum`, `bsc`, `base`, `arbitrum`, `polygon`, `optimism`,
-`avalanche`, and common aliases (`eth`, `arb`, `matic`, `avax`).
+`--chain` accepts `ethereum`, `bsc`, `base`, `arbitrum`, `polygon`,
+`optimism`, `avalanche`, and common aliases (`eth`, `arb`, `matic`,
+`avax`).
 
 ### `watch` — real-time monitor
 
 ```bash
-memecheck watch <ADDRESS>                           # default 5s poll, audit on
-memecheck watch <ADDRESS> --interval 2              # poll every 2s
-memecheck watch <ADDRESS> --max-ticks 10            # stop after 10 ticks
-memecheck watch <ADDRESS> --chain base              # force EVM chain
-memecheck watch <ADDRESS> --no-audit                # disable JSONL log
+memecheck watch <ADDRESS>                                 # default 5s poll, audit on
+memecheck watch <ADDRESS> --interval 2                    # poll every 2s
+memecheck watch <ADDRESS> --max-ticks 10                  # stop after 10 ticks
+memecheck watch <ADDRESS> --chain base
+memecheck watch <ADDRESS> --no-audit                      # disable JSONL log
 memecheck watch <ADDRESS> --audit-dir /var/log/memecheck
 ```
 
-Stops on `Ctrl+C`. See [the watch section below](#real-time-monitor-watch) for
-the decision rules, the audit log format, and the optional push-notification
-channels.
+Stops on `Ctrl+C`. Polls the deepest pool's USD liquidity and emits
+alerts on three rules (critical floor / large single event / slow
+bleed) — see "Decision rules" below.
 
-### `prep` — composed DEX pre-entry workflow
+### `prep` — composed pre-entry workflow
 
 ```bash
 memecheck prep <ADDRESS> --account 1000 --entry 0.0001 --stop 0.000094
@@ -225,100 +168,54 @@ scan's exit-sim so the price-impact check runs at your real size.
 Refuses to print the plan if scan returns `HONEYPOT` or `HARD PASS`
 (`--force` to override). Not a trading bot.
 
-### `cex-check` — CEX perp pre-trade screen
+## What `scan` checks
 
-```bash
-memecheck cex-check XRP                             # screen the XRP perp
-memecheck cex-check XRP --side short                # add funding-direction analysis
-memecheck cex-check BTC --json
-```
+Every metric below is aggregated across **every pool for the token on a
+single chain**, so a multi-pool token's depth and volume are not
+under-counted, and liquidity is never summed across different
+deployments of the same address.
 
-Pulls a live ticker from Kraken Futures and checks funding magnitude,
-mark-vs-index basis, 24h volume, bid-ask spread, and 24h price move.
+### Market structure — [DexScreener](https://dexscreener.com) (all chains)
 
-### `cex-prep` — composed CEX pre-entry workflow
+| Check | Why it matters |
+|---|---|
+| Aggregated USD liquidity | Below ~$20k, you are the slippage on exit. |
+| Liq / Market-Cap ratio | A ratio under ~0.03 means a tiny float is propping up a large nominal valuation. Exits move the price violently. |
+| 24h volume / liquidity | Above ~50× hints at wash trading or bot churn. Below ~0.05× (and liquidity under $2M) signals dead interest. The tool intentionally distrusts the "dead" verdict on mega-cap tokens because DexScreener's token endpoint can under-count volume for many-pool assets. |
+| Age (earliest pool) | Tokens under 24 hours old sit in the peak rug-pull window with no track record. |
+| Buys vs sells (24h count) | Sell count above 1.5× buy count is consistent with active distribution. |
 
-```bash
-memecheck cex-prep XRP --account 1000 --entry 1.16 --stop 1.20 --leverage 5
-memecheck cex-prep BTC --account 5000 --entry 64500 --stop 63000 --hold-hours 72
-```
+### Contract authority and holder structure — [RugCheck](https://rugcheck.xyz) (Solana only)
 
-`cex-check` + `plan`, gated on `HARD PASS` like `prep`. Funding rate
-auto-fetched from the same ticker call.
+| Check | Why it matters |
+|---|---|
+| Mint authority | If not revoked, the deployer can mint more supply at any time and dilute holders to zero. |
+| Freeze authority | If still active, the deployer can freeze your wallet and block sells. |
+| LP locked / burned % | Below 50% means the deployer can withdraw liquidity (classic rug). |
+| Top-10 holder concentration | Above 50% means one coordinated dump ends the chart. |
+| Insider wallet concentration | Wallets RugCheck flags as insider-controlled holding >15% is a separate, additive risk. |
+| Explicit `risks[]` of level `danger` / `warning` | Surfaced verbatim. |
 
-### `cex-watch` — real-time CEX perp monitor
+### Contract behavior — [honeypot.is](https://honeypot.is) (EVM chains)
 
-```bash
-memecheck cex-watch XRP                             # default 30s poll
-memecheck cex-watch XRP --interval 10 --max-ticks 60
-memecheck cex-watch BTC --side long                 # alert on long-side funding spikes
-```
+| Check | Why it matters |
+|---|---|
+| Honeypot simulation | The contract is simulated end-to-end. If you can buy but the sell function reverts, it's a honeypot. |
+| Buy tax / Sell tax | A sell tax above 10% is the contract skimming you on exit. |
+| Open-source flag | Closed-source contracts can't be reviewed, so any behavior is possible. |
 
-Polls Kraken Futures every N seconds; alerts on funding extremes,
-basis blowouts, and OI drops via the same dispatcher as `watch`.
+## Supported DEX chains
 
-### `plan` — position sizing / R-multiples (no network)
+- **Solana**: full coverage (DexScreener + RugCheck). Auto-detected
+  from a base58 mint address.
+- **EVM**: full coverage (DexScreener + honeypot.is) on Ethereum,
+  BNB Smart Chain, Base, Arbitrum, Polygon, Optimism, and Avalanche.
+  Auto-detected from a `0x…` address. Other EVM chains that
+  DexScreener indexes still get the DexScreener checks; the honeypot
+  check defaults to Ethereum if the chain is unrecognised. Force the
+  chain explicitly with `--chain`.
 
-```bash
-memecheck plan --account 1000 --entry 100 --stop 96
-memecheck plan --account 1000 --entry 1.16 --stop 1.20 --leverage 5 --symbol XRP
-memecheck plan --account 1000 --entry 100 --stop 96 --tp 1 --tp 2 --tp 4
-```
-
-Pass `--symbol <TICKER>` to auto-fetch funding from Kraken Futures
-(falls back to Hyperliquid). Explicit `--funding +0.05` overrides.
-
-### `calc` — liquidation-price calculator
-
-```bash
-memecheck calc --liq 0.0000123 --lev 10             # both required
-memecheck calc --liq 0.5 --lev 5 --json             # JSON output
-```
-
-### `backtest` — replay a tape against the decision engine
-
-```bash
-memecheck backtest tape.csv                         # report Decider actions per tick
-memecheck backtest tape.csv --labels labels.csv     # add precision/recall vs ground truth
-memecheck backtest tape.csv --critical-ratio 0.4    # override threshold
-```
-
-CSV format: `timestamp,liquidity_usd,price_usd`. Labels CSV:
-`timestamp,event` where event is one of `rug`, `migration`, `none`.
-Four synthetic tapes ship in `samples/` for immediate use.
-
-### `journal` — trade-prep history
-
-```bash
-memecheck journal                                   # last 20 entries
-memecheck journal --last 50
-memecheck journal --symbol XRP                      # filter
-memecheck journal --json
-```
-
-Every `prep` and `cex-prep` call auto-logs verdict, planned notional,
-and timestamp to `~/.memecheck/journal.sqlite` so you can close the
-feedback loop between *what the tool said* and *what happened*.
-
-### Backward-compatible invocations
-
-```bash
-memecheck <ADDRESS>                                 # implicit scan
-memecheck --liq 0.01 --lev 5                        # implicit calc
-python3 -m memecheck <ADDRESS>                      # if not installed
-python3 memecheck.py <ADDRESS>                      # if not installed, from repo
-```
-
-### Help
-
-```bash
-memecheck --help                                    # top-level
-memecheck scan --help                               # subcommand-specific
-memecheck watch --help
-memecheck calc --help
-```
-
-### Exit codes (scan)
+## Exit codes (scan)
 
 The scanner returns non-zero on findings, so it composes cleanly in shell
 pipelines and CI checks.
@@ -330,10 +227,10 @@ pipelines and CI checks.
 | `2` | Honeypot detected (highest severity) |
 | `3` | No data available for the supplied address |
 
-### Verdict thresholds (scan)
+## Verdict thresholds (scan)
 
-The verdict is a deterministic function of the flag list and is documented as
-named constants in
+The verdict is a deterministic function of the flag list and is
+documented as named constants in
 [`memecheck/common/verdict.py`](memecheck/common/verdict.py):
 
 - Honeypot detected → `HONEYPOT — do not buy` (exit 2)
@@ -501,17 +398,11 @@ the displayed peak.
 - It does **not** account for MEV, sandwich attacks, or the pool's state
   changing between the time you check and the time you trade.
 
-## Real-time monitors (`watch` and `cex-watch`)
+## `watch` decision rules
 
-Two parallel real-time monitors, one per venue. Both share the same
-state-machine + decision-engine + alert-dispatcher plumbing — the only
-difference is the source and the rules tuned to that source's signals.
-
-### DEX side — `memecheck watch <ADDRESS>`
-
-Polls the deepest pool for a token every `--interval` seconds (default
-5s), maintains a rolling buffer of liquidity observations, and evaluates
-three rules:
+The DEX monitor polls the deepest pool's USD liquidity every
+`--interval` seconds, maintains a rolling buffer, and evaluates three
+rules with severity ordering `EXECUTE > ALERT > NONE`:
 
 | Window | Use |
 |---|---|
@@ -526,61 +417,11 @@ three rules:
 | **Large single event** | $\Delta L_{10\text{s}} \le -20\%$ | `EXECUTE` | 2 consecutive ticks |
 | **Slow bleed** | $\Delta L_{60\text{s}} \le -10\%$ AND $\Delta L_{300\text{s}} \le -15\%$ | `ALERT`, escalate to `EXECUTE` | escalate after 6 consecutive ticks |
 
-Severity ordering: `EXECUTE > ALERT > NONE`. `EXECUTE` is currently
-informational — see [Scope: no auto-execute](#scope-no-auto-execute)
-in the Engineering choices section for the architectural choice not to
-sign or send transactions from this codebase.
+`EXECUTE` is currently informational — see [Scope: no auto-execute]
+(#scope-no-auto-execute) in Part 4 for the choice not to sign or send
+transactions from this codebase.
 
-### CEX side — `memecheck cex-watch <SYMBOL>`
-
-Polls Kraken Futures every `--interval` seconds (default 30s) and
-evaluates rules tuned to perp positioning signals rather than DEX pool
-liquidity:
-
-| Rule | Trigger | Action |
-|---|---|---|
-| **Funding extreme** | `|funding_8h\|` ≥ 0.05% | `ALERT` |
-| **Funding direction unfavourable vs `--side`** | elevated funding working against your side | `ALERT` |
-| **Basis blowout** | `|mark − index\|` ≥ 0.5% | `ALERT` |
-| **OI drop** | open interest ≥ 20% below baseline | `ALERT` |
-
-Pass `--side long` or `--side short` so the funding-direction rule
-fires for *your* trade rather than just on magnitude. Same console +
-JSONL audit + env-gated push channels as the DEX monitor.
-
-### Alert channels (optional, env-gated)
-
-All alert channels are off-by-default and constructed only if their
-environment variables are set. The console channel is always on. None
-require an account except where noted.
-
-```bash
-# Telegram — create a bot via @BotFather, /start it, get your chat id.
-export MEMECHECK_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl..."
-export MEMECHECK_TELEGRAM_CHAT_ID="987654321"
-
-# Discord webhook — channel settings → Integrations → Webhooks → New.
-export MEMECHECK_DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
-
-# ntfy — pick a hard-to-guess topic, install the ntfy app, subscribe.
-export MEMECHECK_NTFY_TOPIC="memecheck-yourname-9f2a"
-export MEMECHECK_NTFY_SERVER="https://ntfy.sh"   # optional, default shown
-```
-
-Set zero of these and the monitor still works — alerts go to stderr and
-the audit log. Set all three and every alert fans out to console + phone +
-Discord in parallel.
-
-### Audit log
-
-Every run writes a newline-delimited JSON file to
-`./audit/<chain>-<addr-fingerprint>-<utc-timestamp>.jsonl` by default
-(override with `--audit-dir`, disable with `--no-audit`). One entry per
-event, decision, alert dispatch, plus `start` and `stop` markers. Useful
-both for post-mortems and for replaying decisions through a different
-threshold config later.
-
-### Sample output
+## `watch` sample output
 
 ```
 ########## memecheck watch — $WIF/SOL on solana via raydium (EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx) ##########
@@ -598,43 +439,263 @@ audit log: ./audit/solana-EKpQGSJt-zcjm-20260601T154208Z.jsonl
 
 Rules of thumb when reading it:
 
-- `·` means the rolling window hasn't filled yet — wait `W` seconds and the
-  number appears.
-- `[NONE]` rows have **no action text**. When `ALERT` or `EXECUTE` fires,
-  it shows up as a coloured callout indented under the data row (yellow ⚠
-  for ALERT, red ⛔ for EXECUTE) so it actually stands out instead of
+- `·` means the rolling window hasn't filled yet — wait `W` seconds and
+  the number appears.
+- `[NONE]` rows have **no action text**. When `ALERT` or `EXECUTE`
+  fires, it shows up as a coloured callout indented under the data row
+  (yellow ⚠ for ALERT, red ⛔ for EXECUTE) so it stands out instead of
   drowning in a column of "NONE"s.
 - The data row keeps printing every tick so you can confirm the tool is
   still alive and the deltas are still where you'd expect.
 
-### Where to run it
+## DEX-specific caveats
 
-- **Your laptop while open** — fine for short positions, dies when the lid closes.
-- **A small VPS** (~$5/month) inside `tmux` or `screen` so it survives SSH
-  disconnects. The right answer for any position you care about for more than
-  a few hours.
-- **A Raspberry Pi** at home if you've got one.
-
-### Monitor-specific caveats
-
-- **REST polling, not websocket subscriptions.** Both monitors poll
-  their data source on an interval rather than maintaining a
-  persistent websocket sub. The slow-bleed case (the primary value
-  prop) works fine at 5–30 second cadence; atomic LP pulls or
-  millisecond-scale moves are detected one poll late by design. See
-  [The watch loop is REST-polling](#the-watch-loop-is-rest-polling)
-  for the architectural reasoning.
-- **Single pool / single symbol per run.** The DEX monitor tracks the
-  pool DexScreener reports as deepest at startup; if liquidity migrates
-  to a different pool mid-run, restart to re-resolve. The CEX monitor
-  watches one symbol per process — run multiple in parallel for
-  multiple positions.
+- **REST polling, not websocket subscriptions.** The slow-bleed case
+  (the primary value prop) works fine at 5-second cadence; atomic LP
+  pulls or millisecond-scale moves are detected one poll late by
+  design. See [The watch loop is REST-polling]
+  (#the-watch-loop-is-rest-polling) in Part 4 for the architectural
+  reasoning.
+- **Single pool tracked.** The monitor watches the pool DexScreener
+  reports as deepest at startup; if liquidity migrates to a different
+  pool mid-run, restart to re-resolve.
 - **Strict windowed-delta semantics.** A delta over a window of `W`
   seconds is only computed once the buffer holds at least `W` seconds
-  of history. The DEX slow-bleed rule cannot fire in the first 5
-  minutes of a run — correct, but worth knowing.
+  of history. The slow-bleed rule cannot fire in the first 5 minutes
+  of a run — correct, but worth knowing.
 
-## Liquidation-price calculator
+---
+
+# Part 2 — CEX perpetuals
+
+For perpetual-futures positions on centralised exchanges. Funding,
+basis, and open-interest signals are very different from on-chain pool
+mechanics, so the rules and checks here are tuned for perp positioning
+specifically. Coverage: Kraken Futures (primary) and Hyperliquid
+(fallback for funding auto-fetch).
+
+## CEX commands
+
+### `cex-check` — pre-trade health screen
+
+```bash
+memecheck cex-check XRP                                   # screen the XRP perp
+memecheck cex-check XRP --side short                      # add funding-direction analysis
+memecheck cex-check BTC --json                            # structured JSON output
+```
+
+Pulls a live ticker from Kraken Futures and checks funding magnitude,
+mark-vs-index basis, 24h volume, bid-ask spread, and 24h price move.
+Adding `--side long` or `--side short` makes the funding-direction
+check side-aware — it flags only when funding works *against* your
+intended direction.
+
+### `cex-prep` — composed pre-entry workflow
+
+```bash
+memecheck cex-prep XRP --account 1000 --entry 1.16 --stop 1.20 --leverage 5
+memecheck cex-prep BTC --account 5000 --entry 64500 --stop 63000 --hold-hours 72
+```
+
+`cex-check` + `plan`, gated on `HARD PASS` like `prep`. Funding rate
+is auto-fetched from the same ticker call (one round trip, not two).
+
+### `cex-watch` — real-time monitor
+
+```bash
+memecheck cex-watch XRP                                   # default 30s poll
+memecheck cex-watch XRP --interval 10 --max-ticks 60
+memecheck cex-watch BTC --side long                       # alert on long-side funding spikes
+```
+
+Polls Kraken Futures every N seconds and alerts on funding extremes,
+basis blowouts, and OI drops. Uses the same console + JSONL audit +
+env-gated push-channel machinery as the DEX `watch` (see Part 3 for
+the shared alert configuration).
+
+## What `cex-check` checks
+
+Centralised-perpetual checks pulled live from
+[Kraken Futures](https://futures.kraken.com), with optional side-aware
+funding-direction analysis.
+
+| Check | Why it matters |
+|---|---|
+| Funding magnitude (per 8h) | Annualises to APY. Above ~0.05% per 8h (~55% APY) is "crowded positioning" territory and mean-reversion risk is high. |
+| Funding direction vs side | If you're long and funding is positive (longs pay shorts), it's a daily headwind that your TP target must clear just to break even. Side-aware so the flag only fires when funding works *against* your direction. |
+| Mark-vs-index basis | Perp premium / discount to spot. Sustained gaps above 0.5% almost always collapse via a violent unwind. |
+| 24h volume | Below ~$1M of 24h volume signals a thin order book — stop-fill slippage will be material. |
+| Bid-ask spread | Above ~20 bps means immediate-execution cost is meaningful before any price move. |
+| 24h change | Above ±10% in 24h flags "you're chasing or fading after a violent candle" — statistically a coinflip entry. |
+
+## `cex-watch` decision rules
+
+Different signals than the DEX monitor, tuned to perp positioning:
+
+| Rule | Trigger | Action |
+|---|---|---|
+| **Funding extreme** | funding magnitude per 8h reaches 0.05% (≈55% APY) or more | `ALERT` |
+| **Funding direction unfavourable vs `--side`** | elevated funding (≥0.02% per 8h) working against your side | `ALERT` |
+| **Basis blowout** | mark vs index gap of 0.5% or more in either direction | `ALERT` |
+| **OI drop** | open interest sits 20% or more below the baseline | `ALERT` |
+
+Pass `--side long` or `--side short` so the funding-direction rule
+fires for *your* trade rather than just on magnitude.
+
+## Supported CEX venues
+
+- **Kraken Futures** is the primary source. Public, no auth, well-
+  documented, non-China-aligned. Any symbol on their `PF_<TICKER>USD`
+  perpetual listing works — BTC, ETH, SOL, XRP, DOGE, AVAX, ADA, and
+  many more.
+- **Hyperliquid** is the fallback for funding-rate auto-fetch when
+  Kraken Futures doesn't list a symbol (typical for newer DEX-perp-
+  only tokens like kPEPE, WIF perps, etc.).
+
+## CEX-specific caveats
+
+- **REST polling on a 30s cadence by default.** Funding rates and OI
+  don't move sub-second; the slower cadence keeps you within Kraken's
+  free-tier limits and is sufficient for the events the rules detect.
+- **One symbol per process.** Run multiple `cex-watch` instances in
+  parallel if you have multiple positions.
+- **Funding sign convention matters.** Positive funding = longs pay
+  shorts; negative = shorts pay longs. The planner and the side-aware
+  rules respect this — see Part 4's "Engineering choices" for the math
+  with worked examples.
+
+---
+
+# Part 3 — Position math and analytics
+
+Venue-agnostic tools. The math works for any leveraged position on any
+exchange (CEX perp, DEX perp, anything with a margin model). Pure-math
+where possible — `plan` and `calc` never touch the network unless you
+pass `--symbol` to auto-fetch funding.
+
+## `plan` — position sizing / R-multiples
+
+```bash
+memecheck plan --account 1000 --entry 100 --stop 96
+memecheck plan --account 1000 --entry 1.16 --stop 1.20 --leverage 5 --symbol XRP
+memecheck plan --account 1000 --entry 100 --stop 96 --tp 1 --tp 2 --tp 4
+```
+
+Pass `--symbol <TICKER>` to auto-fetch the current funding rate from
+Kraken Futures (falls back to Hyperliquid if the symbol isn't listed
+there). Explicit `--funding +0.05` always overrides the auto-fetch.
+
+Computes position notional from your risk budget, the appropriate
+liquidation distance for the leverage you're using, fees and funding
+cost over your hold window, and prices for 1R / 2R / 3R take-profit
+targets. Refuses to print a plan if the stop sits inside the
+liquidation distance.
+
+## `calc` — liquidation-price calculator
+
+```bash
+memecheck calc --liq 0.0000123 --lev 10                   # both required
+memecheck calc --liq 0.5 --lev 5 --json
+```
+
+Prints the approximate isolated-margin liquidation price for both
+sides:
+
+$$P_\text{liq}^{\text{long}} = P \left(1 - \frac{1}{L} + mm\right) \qquad P_\text{liq}^{\text{short}} = P \left(1 + \frac{1}{L} - mm\right)$$
+
+Default $mm = 0.005$ matches typical perp-DEX defaults. Pure math, no
+network, no token lookup.
+
+## `backtest` — replay a tape against the decision engine
+
+```bash
+memecheck backtest tape.csv                               # report Decider actions per tick
+memecheck backtest tape.csv --labels labels.csv           # add precision/recall vs ground truth
+memecheck backtest tape.csv --critical-ratio 0.4          # override threshold
+```
+
+CSV format: `timestamp,liquidity_usd,price_usd`. Labels CSV:
+`timestamp,event` where event is one of `rug`, `migration`, `none`.
+Four synthetic tapes ship in `samples/` for immediate use — try
+`samples/atomic_pull.csv` and `samples/slow_bleed.csv`. The harness
+runs the same `Decider` you'd use in production, which is what makes
+threshold-sensitivity sweeps meaningful.
+
+## `journal` — trade-prep history
+
+```bash
+memecheck journal                                         # last 20 entries
+memecheck journal --last 50
+memecheck journal --symbol XRP                            # filter
+memecheck journal --json
+```
+
+Every `prep` and `cex-prep` call auto-logs verdict, planned notional,
+and timestamp to `~/.memecheck/journal.sqlite`. The viewer lets you
+close the feedback loop between *what the tool said* and *what
+actually happened*.
+
+## Alert channels (shared by `watch` and `cex-watch`)
+
+Both real-time monitors use the same alert dispatcher. All channels
+are off-by-default and constructed only if their environment variables
+are set. The console channel is always on.
+
+```bash
+# Telegram — create a bot via @BotFather, /start it, get your chat id.
+export MEMECHECK_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl..."
+export MEMECHECK_TELEGRAM_CHAT_ID="987654321"
+
+# Discord webhook — channel settings → Integrations → Webhooks → New.
+export MEMECHECK_DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+
+# ntfy — pick a hard-to-guess topic, install the ntfy app, subscribe.
+export MEMECHECK_NTFY_TOPIC="memecheck-yourname-9f2a"
+export MEMECHECK_NTFY_SERVER="https://ntfy.sh"   # optional, default shown
+```
+
+Set zero of these and the monitor still works — alerts go to stderr
+and the audit log. Set all three and every alert fans out to console +
+phone + Discord in parallel.
+
+## Audit log (shared)
+
+Every monitor run writes a newline-delimited JSON file to
+`./audit/<chain>-<addr-fingerprint>-<utc-timestamp>.jsonl` by default
+(override with `--audit-dir`, disable with `--no-audit`). One entry per
+event, decision, alert dispatch, plus `start` and `stop` markers.
+
+## Where to run the monitors
+
+- **Your laptop while open** — fine for short positions, dies when the
+  lid closes.
+- **A small VPS** (~$5/month) inside `tmux` or `screen` so it survives
+  SSH disconnects. The right answer for any position you care about for
+  more than a few hours.
+- **A Raspberry Pi** at home if you've got one.
+
+## Backward-compatible invocations
+
+```bash
+memecheck <ADDRESS>                                       # implicit scan
+memecheck --liq 0.01 --lev 5                              # implicit calc
+python3 -m memecheck <ADDRESS>                            # if not installed
+python3 memecheck.py <ADDRESS>                            # if not installed, from repo
+```
+
+## Help
+
+```bash
+memecheck --help                                          # top-level menu
+memecheck scan --help                                     # subcommand-specific
+memecheck cex-check --help
+memecheck plan --help
+memecheck backtest --help
+```
+
+---
+
+# Part 4 — Under the hood
 
 `--liq <entry> --lev <leverage>` prints the approximate isolated-margin
 liquidation price for both sides. The formulas, with maintenance margin $mm$:
@@ -1105,23 +1166,12 @@ input to a real decision knows where the math stops:
   V2. The estimate under-states impact when the trade crosses ticks —
   conservative in the right direction.
 
-## Built with AI assistance
-
-Code generation, refactoring, and most of the test scaffolding were
-done in collaboration with [Claude](https://claude.ai). The original
-~350-line `memecheck.py` and every product/design decision in the
-codebase came from the human author. By mid-2026, this is how most
-working engineering teams ship — the interesting evaluation axis is
-"does the maintainer understand and own the artifact" rather than
-"who typed each character." This README's design notes section is the
-maintainer's answer to that question.
-
 ## Operational caveats
 
-Distinct from the [Domain assumptions](#domain-assumptions) section
-above (which lists what's *mathematically* outside the model), these
-are the **data-source quirks and runtime behaviours** you should know
-about when reading output day-to-day.
+Distinct from the Domain assumptions section above (which lists what's
+*mathematically* outside the model), these are the **data-source
+quirks and runtime behaviours** you should know about when reading
+output day-to-day.
 
 - **DexScreener under-counts 24h volume** on large multi-pool tokens,
   which is why the "dead volume" flag is only raised below $2M of
@@ -1147,6 +1197,21 @@ about when reading output day-to-day.
 - **Funding-rate freshness.** Kraken Futures and Hyperliquid both
   publish near-realtime rates, but a sudden funding swing during a
   liquidation cascade can leave the displayed value seconds stale.
+
+---
+
+# Project meta
+
+## Built with AI assistance
+
+Code generation, refactoring, and most of the test scaffolding were
+done in collaboration with [Claude](https://claude.ai). The original
+~350-line `memecheck.py` and every product/design decision in the
+codebase came from the human author. By mid-2026, this is how most
+working engineering teams ship — the interesting evaluation axis is
+"does the maintainer understand and own the artifact" rather than
+"who typed each character." Part 4 of this README is the maintainer's
+answer to that question.
 
 ## Development
 
