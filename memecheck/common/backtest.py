@@ -52,6 +52,23 @@ class BacktestReport:
     false_positives: int = 0
     precision: Optional[float] = None
     recall: Optional[float] = None
+    f1: Optional[float] = None
+    # Per-tick confusion matrix (binary classification per observation):
+    # ground truth = "this tick is within tolerance of a labelled rug",
+    # prediction   = "this tick fired ALERT or EXECUTE".
+    # This is the right framing for ROC sweeps; the event-level numbers
+    # above are kept for human-readable reporting.
+    tp_ticks: int = 0
+    fp_ticks: int = 0
+    fn_ticks: int = 0
+    tn_ticks: int = 0
+    fpr_ticks: Optional[float] = None    # FP / (FP + TN)
+    # Tick-level precision/recall/specificity. The event-level numbers above
+    # answer "what fraction of rugs did we catch"; these answer "of the ticks
+    # we flagged, how many were inside the labelled rug window".
+    tick_precision: Optional[float] = None   # TP / (TP + FP)
+    tick_recall: Optional[float] = None      # TP / (TP + FN)   (same as sensitivity)
+    tick_specificity: Optional[float] = None # TN / (TN + FP)
     tolerance_seconds: float = DEFAULT_TOLERANCE_SECONDS
 
 
@@ -129,13 +146,16 @@ def replay(
     false_positives = 0
     precision: Optional[float] = None
     recall: Optional[float] = None
+    f1: Optional[float] = None
+    tp_ticks = fp_ticks = fn_ticks = tn_ticks = 0
+    fpr_ticks: Optional[float] = None
 
     if labels is not None:
         rug_times = [ts for ts, evt in labels if evt == "rug"]
         rugs_in_labels = len(rug_times)
 
-        # A non-NONE action within `tolerance_seconds` of a rug counts as
-        # a detection. Detect each rug at most once.
+        # Event-level (existing): a non-NONE action within tolerance of a
+        # labelled rug counts as a detection. Each rug detected at most once.
         unmatched_actions = list(actions)
         for rug_ts in rug_times:
             matched_idx: Optional[int] = None
@@ -153,6 +173,40 @@ def replay(
             precision = (total_actions - false_positives) / total_actions
         if rugs_in_labels > 0:
             recall = rugs_detected / rugs_in_labels
+        if precision is not None and recall is not None and (precision + recall) > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+
+        # Per-tick confusion matrix. For each tape tick:
+        #   y_true = any labelled rug within ±tolerance of this tick's ts
+        #   y_pred = this tick fired ALERT or EXECUTE
+        action_ts_set = {a["ts"] for a in actions}
+        for ev in tape:
+            near_rug = any(abs(ev.ts - rt) <= tolerance_seconds for rt in rug_times)
+            fired = ev.ts in action_ts_set
+            if near_rug and fired:
+                tp_ticks += 1
+            elif near_rug and not fired:
+                fn_ticks += 1
+            elif not near_rug and fired:
+                fp_ticks += 1
+            else:
+                tn_ticks += 1
+        denom = fp_ticks + tn_ticks
+        if denom > 0:
+            fpr_ticks = fp_ticks / denom
+        tick_precision: Optional[float] = None
+        tick_recall: Optional[float] = None
+        tick_specificity: Optional[float] = None
+        if (tp_ticks + fp_ticks) > 0:
+            tick_precision = tp_ticks / (tp_ticks + fp_ticks)
+        if (tp_ticks + fn_ticks) > 0:
+            tick_recall = tp_ticks / (tp_ticks + fn_ticks)
+        if (tn_ticks + fp_ticks) > 0:
+            tick_specificity = tn_ticks / (tn_ticks + fp_ticks)
+    else:
+        tick_precision = None
+        tick_recall = None
+        tick_specificity = None
 
     return BacktestReport(
         ticks=len(tape),
@@ -165,6 +219,15 @@ def replay(
         false_positives=false_positives,
         precision=precision,
         recall=recall,
+        f1=f1,
+        tp_ticks=tp_ticks,
+        fp_ticks=fp_ticks,
+        fn_ticks=fn_ticks,
+        tn_ticks=tn_ticks,
+        fpr_ticks=fpr_ticks,
+        tick_precision=tick_precision,
+        tick_recall=tick_recall,
+        tick_specificity=tick_specificity,
         tolerance_seconds=tolerance_seconds,
     )
 
@@ -187,6 +250,21 @@ def format_report(report: BacktestReport) -> str:
             lines.append(f"  Precision:        {report.precision:.2%}")
         if report.recall is not None:
             lines.append(f"  Recall:           {report.recall:.2%}")
+        if report.f1 is not None:
+            lines.append(f"  F1:               {report.f1:.2%}")
+        if report.tp_ticks or report.fp_ticks or report.fn_ticks or report.tn_ticks:
+            lines.append("")
+            lines.append("=== PER-TICK CONFUSION MATRIX ===")
+            lines.append(f"  TP / FP:          {report.tp_ticks:>5d}  /  {report.fp_ticks:>5d}")
+            lines.append(f"  FN / TN:          {report.fn_ticks:>5d}  /  {report.tn_ticks:>5d}")
+            if report.fpr_ticks is not None:
+                lines.append(f"  False-pos rate:   {report.fpr_ticks:.2%}")
+            if report.tick_precision is not None:
+                lines.append(f"  Tick precision:   {report.tick_precision:.2%}")
+            if report.tick_recall is not None:
+                lines.append(f"  Tick recall:      {report.tick_recall:.2%}")
+            if report.tick_specificity is not None:
+                lines.append(f"  Specificity:      {report.tick_specificity:.2%}")
     if report.actions:
         lines.append("")
         lines.append("=== ACTIONS (first 10) ===")
@@ -258,6 +336,12 @@ def run_backtest_cli(
                 "false_positives": report.false_positives,
                 "precision": report.precision,
                 "recall": report.recall,
+                "f1": report.f1,
+                "tp_ticks": report.tp_ticks,
+                "fp_ticks": report.fp_ticks,
+                "fn_ticks": report.fn_ticks,
+                "tn_ticks": report.tn_ticks,
+                "fpr_ticks": report.fpr_ticks,
                 "tolerance_seconds": report.tolerance_seconds,
             },
             "actions": report.actions,

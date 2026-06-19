@@ -23,7 +23,7 @@ _SUBCOMMANDS = {
     "scan", "watch", "calc", "plan", "prep",
     "cex-check", "cex-prep", "cex-watch",
     "hl-stream",
-    "journal", "backtest",
+    "journal", "backtest", "sweep",
 }
 
 
@@ -423,6 +423,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override critical_liq_ratio threshold",
     )
     backtest.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="emit structured JSON",
+    )
+
+    # ---- sweep ----------------------------------------------------------
+    sweep_p = sub.add_parser(
+        "sweep",
+        help="grid-search Decider thresholds against a labelled corpus",
+        description=(
+            "Replay the same tape with different threshold values, compute "
+            "precision/recall/F1 for each combination, identify the Pareto "
+            "frontier. Closes the 'thresholds hand-tuned with no data behind "
+            "them' critique once you have a labelled corpus."
+        ),
+    )
+    sweep_p.add_argument("tape", help="path to CSV tape file")
+    sweep_p.add_argument("labels", help="path to labels CSV (required for sweep)")
+    sweep_p.add_argument(
+        "--critical-ratios", type=str, default="0.3,0.4,0.5,0.6,0.7",
+        dest="critical_ratios",
+        help="comma-sep grid for critical_liq_ratio (default 0.3..0.7)",
+    )
+    sweep_p.add_argument(
+        "--large-event-pcts", type=str, default="-25,-20,-15",
+        dest="large_event_pcts",
+        help="comma-sep grid for large_event_pct (default -25,-20,-15)",
+    )
+    sweep_p.add_argument(
+        "--slow-bleed-60s-pcts", type=str, default="-15,-10,-7",
+        dest="slow_bleed_60s_pcts",
+        help="comma-sep grid for slow_bleed_60s_pct (default -15,-10,-7)",
+    )
+    sweep_p.add_argument(
+        "--tolerance", type=float, default=60.0,
+        help="match-window tolerance in seconds (default 60)",
+    )
+    sweep_p.add_argument(
         "--json", dest="as_json", action="store_true",
         help="emit structured JSON",
     )
@@ -844,6 +881,60 @@ def _run_backtest(args: argparse.Namespace) -> int:
     )
 
 
+def _run_sweep(args: argparse.Namespace) -> int:
+    """Grid search over Decider thresholds."""
+    from pathlib import Path
+    from memecheck.common.threshold_sweep import (
+        format_sweep_table, pareto_frontier, sweep,
+    )
+
+    def _parse_grid(s: str) -> list[float]:
+        out: list[float] = []
+        for chunk in s.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                out.append(float(chunk))
+            except ValueError:
+                print(f"sweep: bad grid value {chunk!r}", file=sys.stderr)
+                sys.exit(3)
+        return out
+
+    crits = _parse_grid(args.critical_ratios)
+    larges = _parse_grid(args.large_event_pcts)
+    bleeds = _parse_grid(args.slow_bleed_60s_pcts)
+    if not crits or not larges or not bleeds:
+        print("sweep: all three grids must be non-empty", file=sys.stderr)
+        return 3
+
+    points = sweep(
+        Path(args.tape), Path(args.labels),
+        critical_ratios=crits,
+        large_event_pcts=larges,
+        slow_bleed_60s_pcts=bleeds,
+        tolerance_seconds=args.tolerance,
+    )
+    frontier = pareto_frontier(points)
+
+    if args.as_json:
+        print(json.dumps({
+            "tape": args.tape,
+            "labels": args.labels,
+            "grid": {
+                "critical_ratios": crits,
+                "large_event_pcts": larges,
+                "slow_bleed_60s_pcts": bleeds,
+            },
+            "tolerance_seconds": args.tolerance,
+            "points": [p.__dict__ for p in points],
+            "pareto_frontier": [p.__dict__ for p in frontier],
+        }, indent=2, default=str))
+    else:
+        print(format_sweep_table(points, frontier))
+    return 0
+
+
 def _combined_exit_code(scan_exit: int, plan: Any, refuse: bool) -> int:
     """Worst of scan exit and plan safety level wins.
 
@@ -1219,6 +1310,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(_run_journal(args))
     elif args.cmd == "backtest":
         sys.exit(_run_backtest(args))
+    elif args.cmd == "sweep":
+        sys.exit(_run_sweep(args))
     else:
         _print_menu()
         sys.exit(0)

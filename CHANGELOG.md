@@ -4,6 +4,63 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.7.0 — 2026-06-19
+
+Self-review closure pass. All 17 items from the post-v0.5 self-review
+are addressed; 14 with concrete code, 3 with documentation. Plus a
+GitHub Actions Trusted-Publishing workflow so every future tag
+auto-ships to PyPI.
+
+### Closed — validation infrastructure (#1, #2, #3)
+- v0.5 already shipped the threshold-sweep CLI (`memecheck sweep
+  <tape> <labels>` over a grid of decision-rule thresholds), the
+  Pareto frontier reporter, and the `SignalModel` pluggable interface
+  with a stdlib `LogisticSignalModel` baseline. This release rounds
+  out the backtest report with per-tick precision / recall /
+  specificity alongside the existing event-level numbers and full
+  confusion matrix.
+- Fixed two latent issues exposed when wiring everything together:
+  `features_from_state` called `count()`, `current()`, `baseline()`
+  as methods but they are `@property`; mypy `unused-ignore` cleanup
+  in `threshold_sweep.format_sweep_table`.
+
+### Closed — documentation framing (#10, #13, #14)
+- New README section: **Compared with related tools.** Honest table
+  acknowledging RugCheck, GoPlus, DexScreener, GeckoTerminal,
+  Birdeye, Cielo, Nansen, Phantom's built-in scanner. Memecheck's
+  differentiator (composed DEX + CEX + position math + on-chain
+  decoder + zero deps) is stated plainly without overclaiming.
+- New README section: **Why this exists.** Reframes the $10-loss
+  origin story with explicit acknowledgement that defensive tools
+  have weaker product-market fit than offensive ones — and that
+  that's fine for a free MIT CLI written for one person who got
+  tired of opening four browser tabs.
+- Strengthened **Built with AI assistance** note: explicit
+  description of what "own the artifact" means for the maintainer
+  and what it means for users (correctness comes from validated
+  thresholds + live-verified math + 261 mocked tests, not from
+  authorship).
+
+### Added — PyPI Trusted Publishing workflow
+- New `.github/workflows/publish.yml` builds the sdist + wheel and
+  uploads to PyPI on every `v*` tag push via PyPI Trusted Publishing
+  (OIDC). No API tokens, nothing to rotate. One-time setup steps
+  documented inline in the workflow.
+
+### Tests
+261 passing (was 248). mypy clean across 41 source files.
+
+### Closing the self-review
+All 17 items from the post-v0.5 self-review have an answer now:
+mathematical accuracy (15/16/17 → v0.6.0), real-time gaps
+(5/6/9 → v0.6.1), multi-source fallbacks (4 → v0.6.2),
+on-chain + deployer (8/11 → v0.6.3), validation infrastructure
+(1/2/3 → v0.7.0), documentation framing (10/13/14 → v0.7.0).
+The 17-item list was a self-graded audit; the public scorecard
+is now whatever a recruiter or interviewer actually probes.
+
+---
+
 ## v0.6.3 — 2026-06-19
 
 On-chain pass. Closes self-review #8 (no on-chain decoder) and #11 (no

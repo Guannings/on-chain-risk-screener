@@ -13,6 +13,33 @@
 > on a single command surface. Designed to keep you from buying the
 > unsellable and over-sizing the survivable.
 
+## Why this exists
+
+This project started after I lost $10 on a 6,000% memecoin that turned
+out to be totally illiquid. The screening tools that existed weren't
+*wrong* — they correctly flagged the token. But I had to open four
+different browser tabs (DexScreener, RugCheck, Solscan, a portfolio
+tracker) to get a verdict, and I didn't bother. So I built a single
+CLI that runs every check that would have stopped that trade, with
+one command.
+
+Then I generalized: the same risk surface exists for CEX perpetuals
+(funding spikes, basis blowouts, liquidation distance), with no
+unified tool. So `cex-check`, `cex-prep`, and `cex-watch` mirror the
+DEX side. Then the math you actually want at entry — position
+sizing, R-multiples, predicted-funding cost, tier-aware
+maintenance-margin — got built as `plan`. Composed workflows
+(`prep`, `cex-prep`) gate the planner output on the screen verdict,
+so the calculator literally refuses to size a position the screen
+flagged as a rug.
+
+**On the business side:** this is a tool, not a product. Defensive
+tools have weaker product-market fit than offensive ones because the
+payoff (a loss you didn't take) is invisible. That's fine for a
+free, MIT-licensed CLI written for one person who got tired of
+opening four tabs. If you find it useful, the install is `pip
+install memecheck`.
+
 ## What's in the box
 
 The repo covers two halves of the crypto-trading risk landscape under one
@@ -1166,6 +1193,26 @@ input to a real decision knows where the math stops:
   V2. The estimate under-states impact when the trade crosses ticks —
   conservative in the right direction.
 
+## Compared with related tools
+
+memecheck doesn't replace the established risk surfaces — it composes
+them. Worth knowing what already exists and what this adds.
+
+| Tool | What it does well | What memecheck adds on top |
+|------|-------------------|-----------------------------|
+| **[RugCheck.xyz](https://rugcheck.xyz)** | Solana contract risk score, mint/freeze authority, holder concentration. Used by memecheck as a data source. | Composed with DEX market structure, exit-liquidity sim, EVM honeypot detection, and on-chain decoder. One verdict instead of one signal. |
+| **[GoPlus Security](https://gopluslabs.io/)** | Broad multi-chain token safety API. | memecheck doesn't currently integrate GoPlus; it's on the roadmap. Today: focused on Solana-RugCheck + EVM-honeypot.is for narrower but deeper coverage. |
+| **[DexScreener](https://dexscreener.com)** + **[GeckoTerminal](https://geckoterminal.com)** | Price, depth, volume, holders for thousands of pools across all chains. Both used by memecheck as data sources with automatic fallback. | A decision layer on top of the raw data — flags, verdict, exit-liquidity simulation, planner integration. |
+| **[Birdeye](https://birdeye.so)** | Solana market data + wallet analytics. | memecheck doesn't depend on Birdeye (no API key needed). Trade-off: less wallet behaviour signal; more transparency on what's being checked. |
+| **[Cielo Finance](https://cielo.finance)** / **[Nansen](https://nansen.ai)** | Smart-money wallet tracking, on-chain flow. | Out of scope — those are research tools, memecheck is a pre-trade gate. The deployer-history scoring in `scan --check-deployer` covers one narrow slice. |
+| **[Phantom wallet built-in scanner](https://phantom.app)** | In-wallet risk score before approving a swap. | Phantom's scanner is the right surface for casual trades. memecheck is the same idea but scriptable + composable with the planner + CEX coverage. |
+| **No public peer for the CEX side.** | Funding-rate aggregators exist (CoinGlass, etc.) but there's no equivalent of "pre-trade screen + position math + real-time monitor" for perpetuals. | The full `cex-check` / `cex-prep` / `cex-watch` / `plan --venue` pipeline is the differentiated surface. |
+
+The honest one-liner: memecheck's value isn't any individual data
+source — it's the *integration* (DEX + CEX + position math + on-chain
+reads + decision layer) and the fact that it runs from one CLI with
+zero runtime dependencies.
+
 ## Operational caveats
 
 Distinct from the Domain assumptions section above (which lists what's
@@ -1206,12 +1253,29 @@ output day-to-day.
 
 Code generation, refactoring, and most of the test scaffolding were
 done in collaboration with [Claude](https://claude.ai). The original
-~350-line `memecheck.py` and every product/design decision in the
-codebase came from the human author. By mid-2026, this is how most
+~350-line `memecheck.py` was the seed; every product decision,
+threshold value, architectural split, and reviewer-facing claim in
+this README is the human maintainer's. By mid-2026, this is how most
 working engineering teams ship — the interesting evaluation axis is
 "does the maintainer understand and own the artifact" rather than
-"who typed each character." Part 4 of this README is the maintainer's
-answer to that question.
+"who typed each character."
+
+**What "own the artifact" means here.** The maintainer can defend
+any line on a whiteboard: the constant-product AMM math behind the
+exit simulator, the windowed-delta semantics in `state.py`, the
+side-aware funding sign convention in the planner, the Raydium AMM
+v4 byte offsets, the RFC 6455 frame layout in `ws_client.py`. Part 4
+of this README walks through the design end-to-end and is the
+honest answer to that test. If an interviewer wants to pick a file
+and ask why it's structured the way it is, that's the right
+question — and the right document.
+
+**What this means for users.** AI-assisted authorship is not a
+correctness claim. The credibility of the verdicts comes from the
+hand-validated threshold values, the live-verified math (Jupiter
+quote, Raydium decoder, funding-rate normalisation), and the 261
+tests that mock every external surface — not from how the code
+was written.
 
 ## Development
 
@@ -1222,7 +1286,7 @@ git clone https://github.com/Guannings/on-chain-risk-screener.git
 cd on-chain-risk-screener
 pip install -e ".[dev]"
 
-pytest -v                                          # 169 tests
+pytest -v                                          # 261 tests
 mypy memecheck/                                    # static type-check
 python -m memecheck backtest samples/atomic_pull.csv \
                   --labels samples/atomic_pull.labels.csv
