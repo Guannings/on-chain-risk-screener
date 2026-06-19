@@ -22,6 +22,7 @@ from memecheck.scanner.runner import run_token
 _SUBCOMMANDS = {
     "scan", "watch", "calc", "plan", "prep",
     "cex-check", "cex-prep", "cex-watch",
+    "hl-stream",
     "journal", "backtest",
 }
 
@@ -98,6 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
     watch.add_argument(
         "--audit-dir", dest="audit_dir", default=None,
         help="directory for the audit log (default ./audit)",
+    )
+    watch.add_argument(
+        "--latency-log", dest="latency_log", default=None,
+        help="path to JSONL file for per-tick latency samples "
+             "(fetch_s / decide_s / dispatch_s / total_s); "
+             "p50/p99 summary always printed at exit",
     )
 
     # ---- calc ------------------------------------------------------------
@@ -334,6 +341,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="directory for the audit log (default ./audit)",
     )
 
+    # ---- hl-stream ------------------------------------------------------
+    hl_stream = sub.add_parser(
+        "hl-stream",
+        help="sub-second Hyperliquid trade / mid stream (WebSocket)",
+        description=(
+            "Subscribes to Hyperliquid's public WebSocket and prints trades "
+            "or all-mids ticks in real time. Uses the stdlib-only WS client "
+            "shipped in memecheck.common.ws_client — no extra dependencies."
+        ),
+    )
+    hl_stream.add_argument(
+        "coin", nargs="?", default=None,
+        help="coin symbol (e.g. BTC, SOL, HYPE); omit when using --mids",
+    )
+    hl_stream.add_argument(
+        "--mids", action="store_true",
+        help="subscribe to allMids instead of one coin's trades",
+    )
+    hl_stream.add_argument(
+        "--max-events", type=int, default=None, dest="max_events",
+        help="stop after this many messages (default: run until Ctrl+C)",
+    )
+
     # ---- journal --------------------------------------------------------
     journal = sub.add_parser(
         "journal",
@@ -433,6 +463,7 @@ def _run_watch(args: argparse.Namespace) -> int:
     from pathlib import Path
     from memecheck.monitor.runner import run_watch_cli
     audit_dir = Path(args.audit_dir) if args.audit_dir else None
+    latency_log = Path(args.latency_log) if args.latency_log else None
     return run_watch_cli(
         address=args.address.strip(),
         forced_chain=args.chain,
@@ -440,6 +471,7 @@ def _run_watch(args: argparse.Namespace) -> int:
         max_ticks=args.max_ticks,
         audit_enabled=not args.no_audit,
         audit_dir=audit_dir,
+        latency_log=latency_log,
     )
 
 
@@ -1143,6 +1175,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(_run_cex_prep(args))
     elif args.cmd == "cex-watch":
         sys.exit(_run_cex_watch(args))
+    elif args.cmd == "hl-stream":
+        from memecheck.monitor.hl_stream import run_hl_stream_cli
+        sys.exit(run_hl_stream_cli(args))
     elif args.cmd == "journal":
         sys.exit(_run_journal(args))
     elif args.cmd == "backtest":

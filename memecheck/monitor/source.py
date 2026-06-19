@@ -49,6 +49,7 @@ class LiquidityEvent:
     source: str = "dexscreener-poll"
     chain: Optional[str] = None
     pair_address: Optional[str] = None
+    fetch_duration_s: float = 0.0  # how long the HTTP poll took
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
@@ -129,6 +130,17 @@ def _event_from_pair(pair: dict[str, Any], pool: _ResolvedPool) -> Optional[Liqu
     )
 
 
+# When migration auto-resolve fires, the source emits a short notice via the
+# on_error callback (used as a generic notification channel) so the runner
+# can log it to console + audit.
+MIGRATION_NOTICE_PREFIX = "migration: "
+
+# Migration trigger thresholds.
+_MIGRATION_LIQ_DROP_FRACTION = 0.5      # current pool ≤50% of its initial depth
+_MIGRATION_MIN_NEW_DEPTH_MULTIPLE = 1.5  # candidate pool ≥1.5× current depth
+_MIGRATION_COOLDOWN_SECONDS = 60.0       # don't re-check more often than this
+
+
 class DexScreenerPollSource(LiquiditySource):
     """Polls DexScreener's /pairs endpoint and yields LiquidityEvents.
 
@@ -136,6 +148,23 @@ class DexScreenerPollSource(LiquiditySource):
     polls hit a single specific pair endpoint, not the token endpoint).
     Errors from individual polls are swallowed and reported via a callback;
     a single bad poll never crashes the stream.
+
+    Liquidity-migration auto-resolve
+    --------------------------------
+    Pump.fun → Raydium migrations (and EVM dex hops) leave the original
+    pool nearly empty while a new, deeper pool for the same token spins
+    up. Without auto-resolve the monitor stays glued to the dead pool and
+    reports zero liquidity forever. The source watches for this case:
+
+      1. Current pool's liquidity drops below 50% of its initial depth.
+      2. The deepest pool for the token (re-resolved via the token
+         endpoint) is a *different* pair address AND has ≥1.5× the
+         current watched depth.
+
+    When both fire, the source switches its watched pool, re-baselines
+    `_initial_liquidity_usd`, and emits a `migration:` notice via the
+    error callback (also used as the notification channel for migrations).
+    A 60-second cooldown prevents thrashing.
     """
 
     def __init__(
@@ -144,6 +173,7 @@ class DexScreenerPollSource(LiquiditySource):
         interval_seconds: float = 5.0,
         forced_chain: Optional[str] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        enable_migration_resolve: bool = True,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -152,6 +182,10 @@ class DexScreenerPollSource(LiquiditySource):
         self._on_error = on_error or (lambda msg: None)
         # Resolve once, eagerly, so caller knows immediately if the token isn't tradable.
         self._pool = _resolve_pool(addr, forced_chain)
+        self._forced_chain = forced_chain
+        self._enable_migration = enable_migration_resolve
+        self._initial_liquidity_usd: Optional[float] = None
+        self._last_migration_check_ts: float = 0.0
 
     @property
     def pool(self) -> _ResolvedPool:
@@ -162,7 +196,9 @@ class DexScreenerPollSource(LiquiditySource):
             f"https://api.dexscreener.com/latest/dex/pairs/"
             f"{self._pool.chain}/{self._pool.pair_address}"
         )
+        t_start = time.monotonic()
         data = get_json(url)
+        fetch_s = time.monotonic() - t_start
         if "_error" in data:
             self._on_error(f"poll error: {data['_error']}")
             return None
@@ -177,7 +213,83 @@ class DexScreenerPollSource(LiquiditySource):
         event = _event_from_pair(pair, self._pool)
         if event is None:
             self._on_error("poll error: could not derive reserves")
+            return None
+        # Re-emit with the measured fetch duration attached.
+        event = LiquidityEvent(
+            ts=event.ts,
+            base_reserve=event.base_reserve,
+            quote_reserve=event.quote_reserve,
+            quote_price_usd=event.quote_price_usd,
+            liquidity_usd=event.liquidity_usd,
+            price_usd=event.price_usd,
+            source=event.source,
+            chain=event.chain,
+            pair_address=event.pair_address,
+            fetch_duration_s=fetch_s,
+            raw=event.raw,
+        )
+        # Lazy baseline on the first usable observation.
+        if self._initial_liquidity_usd is None:
+            self._initial_liquidity_usd = event.liquidity_usd
+            return event
+        # Check migration eligibility.
+        if self._enable_migration:
+            self._maybe_resolve_migration(event)
         return event
+
+    def _maybe_resolve_migration(self, event: LiquidityEvent) -> None:
+        """If the watched pool's liquidity has collapsed AND a deeper pool
+        for the same token now exists, switch over."""
+        if not self._enable_migration:
+            return
+        if self._initial_liquidity_usd is None or self._initial_liquidity_usd <= 0:
+            return
+        if event.liquidity_usd >= _MIGRATION_LIQ_DROP_FRACTION * self._initial_liquidity_usd:
+            return
+        # Cooldown so we don't hammer the token endpoint when a pool is
+        # legitimately dying.
+        now = time.time()
+        if now - self._last_migration_check_ts < _MIGRATION_COOLDOWN_SECONDS:
+            return
+        self._last_migration_check_ts = now
+
+        try:
+            candidate = _resolve_pool(self._addr, self._forced_chain)
+        except RuntimeError:
+            return
+        if candidate.pair_address == self._pool.pair_address:
+            return
+
+        # Peek at candidate depth before committing.
+        url = (
+            f"https://api.dexscreener.com/latest/dex/pairs/"
+            f"{candidate.chain}/{candidate.pair_address}"
+        )
+        data = get_json(url)
+        if "_error" in data:
+            return
+        pair = data.get("pair") or (data.get("pairs") or [None])[0]
+        if not pair:
+            return
+        cand_event = _event_from_pair(pair, candidate)
+        if cand_event is None:
+            return
+        if cand_event.liquidity_usd < _MIGRATION_MIN_NEW_DEPTH_MULTIPLE * event.liquidity_usd:
+            return
+
+        # Switch.
+        old_pool = self._pool
+        self._pool = candidate
+        self._initial_liquidity_usd = cand_event.liquidity_usd
+        self._on_error(
+            MIGRATION_NOTICE_PREFIX
+            + f"watched pool dropped to ${event.liquidity_usd:,.0f} "
+              f"(<{_MIGRATION_LIQ_DROP_FRACTION*100:.0f}% of baseline "
+              f"${self._initial_liquidity_usd:,.0f}); new deepest pool has "
+              f"${cand_event.liquidity_usd:,.0f}. Switching "
+              f"{old_pool.dex_id or '?'}/{old_pool.pair_address[:8]}... "
+              f"→ {candidate.dex_id or '?'}/{candidate.pair_address[:8]}..."
+        )
 
     async def stream(self) -> AsyncIterator[LiquidityEvent]:
         loop = asyncio.get_running_loop()

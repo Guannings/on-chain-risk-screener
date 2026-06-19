@@ -107,6 +107,7 @@ async def run_monitor(
     header: str = "",
     max_ticks: Optional[int] = None,
     print_each_tick: bool = True,
+    latency_recorder: Optional["object"] = None,
 ) -> RunStats:
     """Drive the monitor loop until cancelled or max_ticks reached.
 
@@ -122,13 +123,18 @@ async def run_monitor(
     _decider = decider  # may be None — fall back to decide_noop below.
     stream = source.stream()
 
+    import time as _time
     try:
         async for ev in stream:
             stats.ticks += 1
             stats.last_event = ev
             state.add(ev)
+
+            _t_decide_start = _time.monotonic()
             dec = _decider.decide(state) if _decider is not None else decide_noop(state)
+            _decide_s = _time.monotonic() - _t_decide_start
             stats.last_decision = dec
+            _dispatch_s: Optional[float] = None
 
             if audit is not None:
                 audit.write("tick", {
@@ -153,7 +159,9 @@ async def run_monitor(
                 _print_tick(stats.ticks, ev, dec)
 
             if dec.action in (ACTION_ALERT, ACTION_EXECUTE) and alerts is not None:
+                _t_disp_start = _time.monotonic()
                 results: list[DispatchResult] = await alerts.dispatch(dec, ev, header)
+                _dispatch_s = _time.monotonic() - _t_disp_start
                 if dec.action == ACTION_ALERT:
                     stats.alerts_fired += 1
                 else:
@@ -167,6 +175,16 @@ async def run_monitor(
                             for r in results
                         ],
                     })
+
+            if latency_recorder is not None:
+                from memecheck.common.latency import LatencySample
+                latency_recorder.add(LatencySample(  # type: ignore[attr-defined]
+                    tick=stats.ticks,
+                    fetch_s=ev.fetch_duration_s,
+                    decide_s=_decide_s,
+                    dispatch_s=_dispatch_s,
+                    total_s=ev.fetch_duration_s + _decide_s + (_dispatch_s or 0.0),
+                ))
 
             if max_ticks is not None and stats.ticks >= max_ticks:
                 break
@@ -209,6 +227,7 @@ def run_watch_cli(
     audit_enabled: bool = True,
     audit_dir: Optional[Path] = None,
     config: DecisionConfig = DEFAULT_CONFIG,
+    latency_log: Optional[Path] = None,
 ) -> int:
     """Synchronous CLI entrypoint for `memecheck watch <addr>`."""
     try:
@@ -230,6 +249,8 @@ def run_watch_cli(
         audit_dir=audit_dir,
         enabled=audit_enabled,
     )
+    from memecheck.common.latency import LatencyRecorder
+    latency = LatencyRecorder(log_path=latency_log)
 
     pool_repr = (
         f"{source.pool.base_symbol or '?'}/{source.pool.quote_symbol or '?'} "
@@ -279,6 +300,7 @@ def run_watch_cli(
                 audit=audit,
                 header=pool_repr,
                 max_ticks=max_ticks,
+                latency_recorder=latency,
             )
         )
         stop_task = asyncio.create_task(stop_event.wait())
@@ -309,4 +331,6 @@ def run_watch_cli(
         f"{stats.alerts_fired} alert(s), {stats.executes_fired} execute(s).",
         file=sys.stderr,
     )
+    if latency.count > 0:
+        print(latency.format_summary(), file=sys.stderr)
     return 0

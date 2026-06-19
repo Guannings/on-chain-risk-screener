@@ -4,6 +4,49 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.6.1 — 2026-06-19
+
+Real-time gaps pass. Three additions close the longstanding "is this thing
+actually real-time?" critiques from the self-review (#5, #6, #9).
+
+### Added — stdlib-only WebSocket client (`ws_client.py` + `hyperliquid_ws.py`)
+- Minimal RFC 6455 client built on `socket` + `ssl`. No `websockets`
+  dependency added — zero-runtime-dep promise preserved.
+- Supports TLS, the upgrade handshake (key generation + Accept validation),
+  text frames at all three payload-length encodings (7/16/64-bit), masked
+  outbound frames, ping → automatic pong, and close frames.
+- Hyperliquid wrapper subscribes to `trades` and `allMids`. Sub-second event
+  flow against `wss://api.hyperliquid.xyz/ws`.
+- New subcommand `memecheck hl-stream <COIN>` prints live trades; `--mids`
+  switches to the all-coins mid-price tick stream. `--max-events` bounds.
+
+### Added — pool-migration auto-resolve (`source.py`)
+- The DEX watch source now detects when the watched pool's liquidity
+  drops below 50% of its baseline AND a *different* pool for the same
+  token has at least 1.5× the watched depth. When both fire, it
+  switches the watched pool, re-baselines liquidity, and emits a
+  `migration:` notice. 60-second cooldown prevents thrashing.
+- Closes the pump.fun → Raydium migration blind spot — previously the
+  monitor would stare at the empty old pool indefinitely.
+- New `enable_migration_resolve` flag on `DexScreenerPollSource` lets
+  callers disable the behaviour for testing.
+
+### Added — latency-SLO instrumentation (`latency.py`)
+- New `LatencyRecorder` collects per-tick `fetch_s / decide_s /
+  dispatch_s / total_s` samples and computes p50/p99 percentiles.
+- `watch` accepts `--latency-log <PATH>` to write per-tick JSONL for
+  offline analysis. Summary is always printed at exit.
+- Ring buffer caps at 50k samples so 24-hour runs don't balloon memory.
+- Answers the "how slow is this thing?" question with actual measured
+  numbers instead of vibes (typical WIF poll: ~360ms p50, ~580ms p99
+  end-to-end on consumer broadband).
+
+### Tests
+209 passing (was 187). mypy clean across 34 source files. Closes
+self-review items #5, #6, #9 from the v0.5 post-mortem.
+
+---
+
 ## v0.6.0 — 2026-06-19
 
 Math-layer accuracy pass. Three sharp upgrades to the position planner and
