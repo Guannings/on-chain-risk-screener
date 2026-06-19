@@ -33,7 +33,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 
 from memecheck.common.http import get_json
 from memecheck.common.liquidity_math import derive_reserves
-from memecheck.common.sources import fetch_dexscreener
+from memecheck.common.sources import fetch_dex_pairs
 
 
 @dataclass(frozen=True)
@@ -72,10 +72,10 @@ class _ResolvedPool:
 def _resolve_pool(addr: str, forced_chain: Optional[str]) -> _ResolvedPool:
     """Find the deepest pool for `addr`, return its chain + pair address.
 
-    Reuses the existing synchronous fetch_dexscreener so the scanner's
-    aggregation/chain-locking logic is shared.
+    Reuses the existing synchronous fetch_dex_pairs so the scanner's
+    aggregation/chain-locking logic + GeckoTerminal fallback are shared.
     """
-    primary, _pairs, err = fetch_dexscreener(addr, forced_chain)
+    primary, _pairs, err = fetch_dex_pairs(addr, forced_chain)
     if err or not primary:
         raise RuntimeError(f"Cannot resolve pool for {addr}: {err or 'no pair'}")
     chain = primary.get("chainId")

@@ -187,13 +187,126 @@ def fetch_hyperliquid_funding(symbol: str) -> Optional[FundingRateResult]:
     return None
 
 
+# ----------------------------- Deribit ----------------------------------
+
+# Deribit publishes per-8h funding directly on the ticker.
+#   `current_funding` = current per-8h decimal rate (e.g. 0.0001 = 0.01%)
+#   `funding_8h`      = realised average over the previous 8h
+# Endpoint: /public/ticker?instrument_name=BTC-PERPETUAL
+# Linear perps follow the {COIN}-PERPETUAL or {COIN}_USDC-PERPETUAL pattern.
+
+
+def _deribit_perp_symbol(symbol: str) -> str:
+    return f"{symbol.upper().lstrip('$')}-PERPETUAL"
+
+
+def fetch_deribit_funding(symbol: str) -> Optional[FundingRateResult]:
+    """Pull Deribit's current per-8h funding rate. Predicted next-cycle
+    isn't exposed by Deribit's public API in a stable form, so left None."""
+    canon = symbol.upper().lstrip("$")
+    instrument = _deribit_perp_symbol(canon)
+    url = f"https://www.deribit.com/api/v2/public/ticker?instrument_name={instrument}"
+    data = get_json(url)
+    if "_error" in data or "result" not in data:
+        return None
+    r = data["result"] or {}
+    raw = r.get("current_funding")
+    mark = r.get("mark_price")
+    if raw is None:
+        return None
+    try:
+        raw_f = float(raw)
+        mark_f = float(mark) if mark is not None else None
+    except (TypeError, ValueError):
+        return None
+    # Already per-8h decimal → percent is *100.
+    per_8h_pct = raw_f * 100.0
+    return FundingRateResult(
+        symbol=canon,
+        rate_per_8h_pct=per_8h_pct,
+        raw_rate=raw_f,
+        raw_unit="decimal per 8h (relative)",
+        source="deribit",
+        mark_price=mark_f,
+        perp_symbol=instrument,
+        rate_per_8h_pct_next=None,
+    )
+
+
+# ----------------------------- BitMEX -----------------------------------
+
+# BitMEX publishes funding on /instrument:
+#   `fundingRate`           = current per-8h decimal
+#   `indicativeFundingRate` = next-cycle predicted decimal
+#   `fundingInterval`       = ISO format always equivalent to 8h for perps
+# Symbol convention: XBTUSD for BTC, ETHUSD for ETH, etc.
+
+_BITMEX_ALIASES: dict[str, str] = {
+    "BTC": "XBT",
+    "WBTC": "XBT",
+}
+
+
+def _bitmex_perp_symbol(symbol: str) -> str:
+    canon = symbol.upper().lstrip("$")
+    canon = _BITMEX_ALIASES.get(canon, canon)
+    return f"{canon}USD"
+
+
+def fetch_bitmex_funding(symbol: str) -> Optional[FundingRateResult]:
+    """Pull BitMEX's current and predicted per-8h funding rates."""
+    canon = symbol.upper().lstrip("$")
+    target = _bitmex_perp_symbol(canon)
+    url = f"https://www.bitmex.com/api/v1/instrument?symbol={target}"
+    data = get_json(url)
+    if "_error" in data:
+        return None
+    # /instrument returns a list (filtered by symbol).
+    if not isinstance(data, list) or not data:
+        return None
+    r = data[0] or {}
+    raw = r.get("fundingRate")
+    raw_next = r.get("indicativeFundingRate")
+    mark = r.get("markPrice")
+    if raw is None:
+        return None
+    try:
+        raw_f = float(raw)
+        mark_f = float(mark) if mark is not None else None
+    except (TypeError, ValueError):
+        return None
+    per_8h_pct = raw_f * 100.0
+    per_8h_pct_next: Optional[float] = None
+    if raw_next is not None:
+        try:
+            per_8h_pct_next = float(raw_next) * 100.0
+        except (TypeError, ValueError):
+            per_8h_pct_next = None
+    return FundingRateResult(
+        symbol=canon,
+        rate_per_8h_pct=per_8h_pct,
+        raw_rate=raw_f,
+        raw_unit="decimal per 8h (relative)",
+        source="bitmex",
+        mark_price=mark_f,
+        perp_symbol=target,
+        rate_per_8h_pct_next=per_8h_pct_next,
+    )
+
+
 # ----------------------------- public entry point ------------------------
 
 # Source order — names looked up dynamically at call time (NOT captured as
-# function references) so tests can monkeypatch either source individually.
-# Kraken Futures first (deeper books, more liquid for majors); Hyperliquid
-# as fallback for symbols only listed on DEX perps.
-_SOURCE_NAMES: tuple[str, ...] = ("fetch_kraken_funding", "fetch_hyperliquid_funding")
+# function references) so tests can monkeypatch each source individually.
+# Order matters: Kraken Futures (deepest books for majors) → Hyperliquid
+# (newer DEX-perp coverage) → Deribit (regulated venue, BTC/ETH focus) →
+# BitMEX (legacy but still listed). First non-None result wins.
+_SOURCE_NAMES: tuple[str, ...] = (
+    "fetch_kraken_funding",
+    "fetch_hyperliquid_funding",
+    "fetch_deribit_funding",
+    "fetch_bitmex_funding",
+)
 
 
 def fetch_funding_rate(symbol: str) -> Optional[FundingRateResult]:

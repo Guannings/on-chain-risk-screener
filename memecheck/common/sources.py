@@ -1,11 +1,19 @@
-"""Data source clients: DexScreener, RugCheck, honeypot.is.
+"""Data source clients: DexScreener, RugCheck, honeypot.is, GeckoTerminal.
 
 Each function returns raw parsed JSON (or {'_error': ...}) so analyzers can
 be tested independently of network behavior.
+
+Multi-source DEX dispatch
+-------------------------
+`fetch_dex_pairs` is the unified entry point for the rest of the codebase.
+It tries each source in `_DEX_SOURCE_NAMES` (by name, looked up dynamically
+so tests can monkey-patch each individually) and returns the first
+non-empty result. Currently DexScreener first, GeckoTerminal as fallback.
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Optional
 
 from memecheck.common.http import get_json
@@ -59,3 +67,50 @@ def fetch_rugcheck(mint: str) -> dict[str, Any]:
 
 def fetch_honeypot(addr: str, chain_id: int) -> dict[str, Any]:
     return get_json(f"https://api.honeypot.is/v2/IsHoneypot?address={addr}&chainID={chain_id}")
+
+
+# ----------------------------- multi-source DEX dispatch -----------------
+
+
+def _try_dexscreener(
+    addr: str, forced_chain: Optional[str]
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+    return fetch_dexscreener(addr, forced_chain)
+
+
+def _try_geckoterminal(
+    addr: str, forced_chain: Optional[str]
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+    # Import lazily so a GT-module load error doesn't break sources.py at import time.
+    from memecheck.common.geckoterminal import fetch_geckoterminal
+    return fetch_geckoterminal(addr, forced_chain)
+
+
+# Dynamic dispatch by name so individual sources are monkey-patchable in tests.
+# Order: DexScreener first (richer per-side liquidity, faster), GT as fallback.
+_DEX_SOURCE_NAMES: tuple[str, ...] = ("_try_dexscreener", "_try_geckoterminal")
+
+
+def fetch_dex_pairs(
+    addr: str, forced_chain: Optional[str] = None
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+    """Multi-source DEX pair lookup with automatic fallback.
+
+    Returns the first source that yields a non-empty primary pair. Adds a
+    `_source` key to the primary dict so callers know which feed it came
+    from. Falls through every source on errors; returns the last error
+    when all fail.
+    """
+    last_err: Optional[str] = None
+    module = sys.modules[__name__]
+    for name in _DEX_SOURCE_NAMES:
+        fn = getattr(module, name)
+        primary, pairs, err = fn(addr, forced_chain)
+        if primary is not None:
+            # Tag the source so downstream code can attribute / log.
+            if "_source" not in primary:
+                primary["_source"] = name.replace("_try_", "")
+            return primary, pairs, err
+        if err:
+            last_err = err
+    return None, [], last_err

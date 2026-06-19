@@ -74,7 +74,7 @@ def test_resolve_pool_uses_fetch_dexscreener(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         source_mod,
-        "fetch_dexscreener",
+        "fetch_dex_pairs",
         lambda a, c=None: (fake_primary, [fake_primary], None),
     )
     pool = _resolve_pool("0xWhatever", forced_chain=None)
@@ -87,7 +87,7 @@ def test_resolve_pool_uses_fetch_dexscreener(monkeypatch) -> None:
 def test_resolve_pool_raises_on_no_pair(monkeypatch) -> None:
     monkeypatch.setattr(
         source_mod,
-        "fetch_dexscreener",
+        "fetch_dex_pairs",
         lambda a, c=None: (None, [], "No DEX pairs found"),
     )
     with pytest.raises(RuntimeError, match="Cannot resolve pool"):
@@ -108,7 +108,7 @@ def test_poll_source_yields_events_then_stops(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         source_mod,
-        "fetch_dexscreener",
+        "fetch_dex_pairs",
         lambda a, c=None: (fake_primary, [fake_primary], None),
     )
 
@@ -155,7 +155,7 @@ def test_poll_source_swallows_bad_polls(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         source_mod,
-        "fetch_dexscreener",
+        "fetch_dex_pairs",
         lambda a, c=None: (fake_primary, [fake_primary], None),
     )
     call_count = {"n": 0}

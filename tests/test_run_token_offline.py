@@ -23,7 +23,7 @@ SOL_ADDR = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
 def test_run_token_clean_evm_path(monkeypatch, clean_dex_pairs, clean_honeypot) -> None:
     # Reuse the clean_dex_pairs fixture but tell DexScreener the chain is base.
     pairs = [dict(p, chainId="base") for p in clean_dex_pairs]
-    monkeypatch.setattr(scanner_runner, "fetch_dexscreener", lambda a, c=None: (pairs[0], pairs, None))
+    monkeypatch.setattr(scanner_runner, "fetch_dex_pairs", lambda a, c=None: (pairs[0], pairs, None))
     monkeypatch.setattr(scanner_runner, "fetch_honeypot", lambda a, cid: clean_honeypot)
 
     result, code = memecheck.run_token(EVM_ADDR, forced_chain="base", as_json=True)
@@ -38,7 +38,7 @@ def test_run_token_clean_evm_path(monkeypatch, clean_dex_pairs, clean_honeypot) 
 
 def test_run_token_honeypot_exit_code(monkeypatch, clean_dex_pairs, honeypot_response) -> None:
     pairs = [dict(p, chainId="ethereum") for p in clean_dex_pairs]
-    monkeypatch.setattr(scanner_runner, "fetch_dexscreener", lambda a, c=None: (pairs[0], pairs, None))
+    monkeypatch.setattr(scanner_runner, "fetch_dex_pairs", lambda a, c=None: (pairs[0], pairs, None))
     monkeypatch.setattr(scanner_runner, "fetch_honeypot", lambda a, cid: honeypot_response)
 
     result, code = memecheck.run_token(EVM_ADDR, as_json=True)
@@ -52,7 +52,7 @@ def test_run_token_solana_path_with_high_concentration(
     monkeypatch, clean_dex_pairs, high_concentration_rugcheck
 ) -> None:
     monkeypatch.setattr(
-        scanner_runner, "fetch_dexscreener", lambda a, c=None: (clean_dex_pairs[0], clean_dex_pairs, None)
+        scanner_runner, "fetch_dex_pairs", lambda a, c=None: (clean_dex_pairs[0], clean_dex_pairs, None)
     )
     monkeypatch.setattr(scanner_runner, "fetch_rugcheck", lambda mint: high_concentration_rugcheck)
 
@@ -67,7 +67,7 @@ def test_run_token_solana_path_with_high_concentration(
 
 def test_run_token_no_data(monkeypatch) -> None:
     monkeypatch.setattr(
-        scanner_runner, "fetch_dexscreener", lambda a, c=None: (None, [], "No DEX pairs found")
+        scanner_runner, "fetch_dex_pairs", lambda a, c=None: (None, [], "No DEX pairs found")
     )
     # Even with no DexScreener data, the EVM branch still calls honeypot.is.
     monkeypatch.setattr(scanner_runner, "fetch_honeypot", lambda a, cid: {"_error": "n/a"})

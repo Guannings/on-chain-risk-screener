@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memecheck"
-version = "0.6.1"
+version = "0.6.2"
 description = "Crypto risk toolkit: pre-trade screening, position sizing, real-time monitoring across both DEX (Solana / EVM) and CEX (Kraken Futures / Hyperliquid) perpetuals. Zero runtime dependencies."
 requires-python = ">=3.9"
 license = { text = "MIT" }

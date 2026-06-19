@@ -23,7 +23,7 @@ from memecheck.common.liquidity_math import (
 )
 from memecheck.common.sources import (
     EVM_CHAIN_IDS,
-    fetch_dexscreener,
+    fetch_dex_pairs,
     fetch_honeypot,
     fetch_rugcheck,
 )
@@ -170,7 +170,7 @@ def run_token(
     if not as_json:
         print(f"\n########## memecheck: {addr} ##########")
 
-    p, pairs, err = fetch_dexscreener(addr, forced_chain)
+    p, pairs, err = fetch_dex_pairs(addr, forced_chain)
     if err:
         result["sources"]["dexscreener"] = {"error": err}
         if not as_json:

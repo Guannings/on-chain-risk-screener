@@ -4,6 +4,41 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.6.2 — 2026-06-19
+
+Multi-source fallback pass. Closes self-review #4 (single-source dependency).
+
+### Added — GeckoTerminal DEX fallback (`geckoterminal.py` + `fetch_dex_pairs`)
+- New module adapts CoinGecko's GeckoTerminal pools API to the
+  DexScreener pair-dict shape that the rest of the codebase consumes.
+  No new dependencies; same `derive_reserves` math works end-to-end.
+- Unified `fetch_dex_pairs(addr, forced_chain)` tries DexScreener
+  first, then GeckoTerminal. Result is tagged with `_source` so
+  callers know where the data came from.
+- Scanner and monitor source both use the unified dispatcher.
+  Tool keeps working when DexScreener is down.
+- Network slug translation table covers Ethereum/BSC/Base/Arbitrum/
+  Polygon/Optimism/Avalanche/Solana/Fantom.
+
+### Added — Deribit + BitMEX funding sources (`funding.py`)
+- `fetch_deribit_funding` hits `/public/ticker?instrument_name=
+  BTC-PERPETUAL` and normalises `current_funding` from per-8h decimal
+  to per-8h percent. Mark price carried through. Deribit doesn't
+  publish a stable predicted rate, so that field stays None.
+- `fetch_bitmex_funding` hits `/instrument?symbol=XBTUSD`, normalises
+  `fundingRate` (per-8h decimal → per-8h percent) AND
+  `indicativeFundingRate` (next-cycle prediction → also normalised).
+  BTC → XBT alias built in.
+- Source order: Kraken Futures → Hyperliquid → Deribit → BitMEX.
+  Dispatched dynamically by name so each source is individually
+  monkey-patchable.
+- All four sources picked for non-China / non-Musk-firm criteria.
+
+### Tests
+227 passing (was 209). mypy clean across 35 source files.
+
+---
+
 ## v0.6.1 — 2026-06-19
 
 Real-time gaps pass. Three additions close the longstanding "is this thing
