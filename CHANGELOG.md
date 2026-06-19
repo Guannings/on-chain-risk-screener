@@ -4,6 +4,53 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.6.3 — 2026-06-19
+
+On-chain pass. Closes self-review #8 (no on-chain decoder) and #11 (no
+deployer-history signal). The tool can now read Solana directly and
+score the human behind a token.
+
+### Added — Solana RPC client + Base58 codec (`solana_rpc.py`)
+- Minimal JSON-RPC client built on stdlib `urllib` + `json`. POSTs to
+  `api.mainnet-beta.solana.com`. Wrappers for `getAccountInfo`,
+  `getTokenAccountBalance`, `getSignaturesForAddress`, `getTransaction`.
+- Hand-rolled Base58 codec (Bitcoin / Solana alphabet) — no `base58`
+  dependency. Handles leading-zero preservation correctly.
+
+### Added — Raydium AMM v4 on-chain decoder (`raydium.py`)
+- Decodes the 752-byte liquidity-state account at the verified field
+  offsets (baseVault @ 336, quoteVault @ 368, baseMint @ 400,
+  quoteMint @ 432; baseDecimal @ 32, quoteDecimal @ 40).
+- Three RPC calls per pool: one `getAccountInfo`, two
+  `getTokenAccountBalance`. Returns a `RaydiumPool` dataclass with
+  token-side reserves in UI units.
+- Live verified against the WIF/SOL pool (`EP2ib...zMx`): decoder
+  reports $4.11M from on-chain reserves, matches DexScreener's $4.10M
+  display number within rounding.
+- Verifies account owner is the AMM v4 program before decoding (CPMM
+  and CLMM pools have different layouts and are intentionally rejected).
+
+### Added — deployer-history scoring (`deployer.py` + `scan --check-deployer`)
+- `find_deployer(mint)` walks the mint's signature history newest →
+  oldest (up to 5 pages of 1000 sigs each), pulls the fee-payer of the
+  oldest known transaction.
+- `recent_mints_for_deployer(deployer)` scans the wallet's recent
+  transactions for `Program log: Instruction: InitializeMint` / `…Mint2`
+  log lines, dedupes, returns the mint pubkeys.
+- `score_deployer` evaluates depth of each prior mint via
+  `fetch_dex_pairs` (DexScreener → GT fallback). A mint with <$1k
+  liquidity is "dead". Returns flag string when dead-ratio crosses 50%
+  (caution) or 75% (strong serial-rugger).
+- New scan flag: `--check-deployer`. Solana-only by design; EVM has a
+  different deployer concept (contract creator) and is out of scope.
+- 30-second wall-clock budget + 20-mint cap keep the scan from hanging
+  on prolific deployers.
+
+### Tests
+248 passing (was 227). mypy clean across 38 source files.
+
+---
+
 ## v0.6.2 — 2026-06-19
 
 Multi-source fallback pass. Closes self-review #4 (single-source dependency).

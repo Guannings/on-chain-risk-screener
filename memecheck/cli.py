@@ -69,6 +69,12 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--lev", type=float, help="leverage for liquidation calc (appended to scan)"
     )
+    scan.add_argument(
+        "--check-deployer", dest="check_deployer", action="store_true",
+        help="walk the mint's first-tx fee payer + score their prior "
+             "deployments by current depth (Solana only; adds 5-30s of "
+             "Solana RPC + DEX-API calls)",
+    )
 
     # ---- watch -----------------------------------------------------------
     watch = sub.add_parser(
@@ -453,6 +459,37 @@ def _run_scan(args: argparse.Namespace) -> int:
         result["liquidation"] = liq_report_dict(args.liq, args.lev)
         if not args.as_json:
             liq_report(args.liq, args.lev)
+    if args.check_deployer:
+        # Solana-only by design. EVM has a different "deployer" concept
+        # (contract creator), out of scope here.
+        chain = (result.get("chain") or "").lower()
+        if chain != "solana":
+            if not args.as_json:
+                print("\n  ↻ --check-deployer requested but token isn't on Solana — skipped.")
+        else:
+            if not args.as_json:
+                print("\n  ↻ Scoring deployer history (this takes 5-30s of RPC calls)…")
+            from memecheck.common.deployer import score_deployer
+            try:
+                report = score_deployer(args.address.strip(), self_mint=args.address.strip())
+            except Exception as e:    # noqa: BLE001
+                report = None
+                if not args.as_json:
+                    print(f"  ! deployer scoring failed: {e}")
+            if report is not None:
+                result["deployer_history"] = {
+                    "deployer": report.deployer,
+                    "prior_mint_count": len(report.prior_mints),
+                    "sampled_count": report.sampled_count,
+                    "dead_count": report.dead_count,
+                    "flag": report.flag,
+                    "note": report.note,
+                }
+                if not args.as_json:
+                    if report.flag:
+                        print(f"  [!] DEPLOYER HISTORY: {report.flag}")
+                    if report.note:
+                        print(f"      {report.note}")
     if args.as_json:
         print(json.dumps(result, indent=2, default=str))
     return code
