@@ -42,6 +42,7 @@ class FundingRateResult:
     source: str                       # exchange / endpoint label
     mark_price: Optional[float] = None
     perp_symbol: Optional[str] = None  # exchange-specific symbol used
+    rate_per_8h_pct_next: Optional[float] = None  # predicted next-cycle rate
 
 
 # ----------------------------- Kraken Futures ----------------------------
@@ -83,6 +84,7 @@ def fetch_kraken_funding(symbol: str) -> Optional[FundingRateResult]:
         if ticker.get("symbol") != target:
             continue
         raw = ticker.get("fundingRate")
+        raw_next = ticker.get("fundingRatePrediction")
         mark = ticker.get("markPrice")
         if raw is None or mark is None:
             return None
@@ -95,6 +97,12 @@ def fetch_kraken_funding(symbol: str) -> Optional[FundingRateResult]:
             return None
         # Normalise: absolute hourly USD/contract → relative percent per 8h.
         per_8h_pct = (raw_f / mark_f) * (8.0 / KRAKEN_RATE_PERIOD_HOURS) * 100.0
+        per_8h_pct_next: Optional[float] = None
+        if raw_next is not None:
+            try:
+                per_8h_pct_next = (float(raw_next) / mark_f) * (8.0 / KRAKEN_RATE_PERIOD_HOURS) * 100.0
+            except (TypeError, ValueError):
+                per_8h_pct_next = None
         return FundingRateResult(
             symbol=symbol.upper().lstrip("$"),
             rate_per_8h_pct=per_8h_pct,
@@ -103,6 +111,7 @@ def fetch_kraken_funding(symbol: str) -> Optional[FundingRateResult]:
             source="kraken-futures",
             mark_price=mark_f,
             perp_symbol=target,
+            rate_per_8h_pct_next=per_8h_pct_next,
         )
     return None
 
@@ -163,6 +172,8 @@ def fetch_hyperliquid_funding(symbol: str) -> Optional[FundingRateResult]:
             # Hyperliquid's funding is already relative per hour. Convert
             # to per-8h percent: × 8 × 100.
             per_8h_pct = raw_f * 8.0 * 100.0
+            # Hyperliquid doesn't publish a predicted next-cycle rate via
+            # the metaAndAssetCtxs endpoint — leave as None.
             return FundingRateResult(
                 symbol=canon,
                 rate_per_8h_pct=per_8h_pct,
@@ -171,6 +182,7 @@ def fetch_hyperliquid_funding(symbol: str) -> Optional[FundingRateResult]:
                 source="hyperliquid",
                 mark_price=mark_f,
                 perp_symbol=canon,
+                rate_per_8h_pct_next=None,
             )
     return None
 

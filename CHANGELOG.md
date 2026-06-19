@@ -4,6 +4,51 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.6.0 — 2026-06-19
+
+Math-layer accuracy pass. Three sharp upgrades to the position planner and
+exit simulator, all surfacing higher-fidelity numbers than the previous
+release.
+
+### Added — tiered maintenance margin (`mmr_tiers.py`)
+- Published MMR schedules for Kraken Futures, Bybit, and Deribit (BTC + alt
+  defaults per venue).
+- `plan` accepts `--venue {kraken-futures, bybit, deribit}`. Combined with
+  `--symbol`, the planner looks up the correct tier for the position notional
+  and uses that MMR for the liquidation formula instead of the constant 0.5%.
+- `--maint-margin` still wins if explicitly set. New `maint_margin_source`
+  field on `PositionPlan` records which path was taken.
+- `cex-prep` automatically passes `venue="kraken-futures"` so its liquidation
+  distance reflects exchange-real behaviour at any size.
+
+### Added — predicted-funding-aware planner
+- `FundingRateResult` now carries `rate_per_8h_pct_next`. Kraken's
+  `fundingRatePrediction` field is normalised the same way as the current rate
+  and populated; Hyperliquid leaves it `None`.
+- `compute_plan` accepts `funding_pct_8h_next`. When held for ≥1 cycle, the
+  first cycle uses the predicted rate and remaining cycles use the current
+  rate. Better cost estimate than the previous "current rate × all cycles".
+- Output shows both numbers, e.g.
+  `(cycle-1 uses -0.007% predicted, then -0.004%)`.
+
+### Added — Jupiter-routed multi-pool exit-sim (`jupiter.py`)
+- New module hitting Jupiter's public quote API
+  (`lite-api.jup.ag/swap/v1/quote`). For Solana scans with `--buy-size`, the
+  scanner reports a *realistic* multi-pool price-impact estimate alongside
+  the V2 single-pool estimate.
+- Output adds a `Realistic (Jupiter, N-hop route)` line and, when V2 fired
+  a conservative flag that Jupiter contradicts, a softening note ("Jupiter
+  would route around the thin pool").
+- Covers concentrated-liquidity (Whirlpool, CLMM) and multi-pool splits —
+  both of which the V2 math previously ignored. EVM still V2-only (1inch or
+  0x would be the parallel client; out of scope here).
+
+### Tests
+187 passing (was 169). mypy clean across 30 source files. Closes
+self-review items #15, #16, #17 from the v0.5 post-mortem.
+
+---
+
 ## v0.5.0 — 2026-06-18
 
 ### Added

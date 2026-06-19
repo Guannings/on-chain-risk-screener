@@ -65,8 +65,12 @@ class PositionPlan:
     leverage_requested: Optional[float]
     fee_bps: int
     funding_pct_8h: float
+    funding_pct_8h_next: Optional[float]
     hold_hours: float
     maint_margin: float
+    maint_margin_source: str
+    venue: Optional[str]
+    symbol: Optional[str]
 
     # Derived classification
     side: str                                # "long" or "short"
@@ -105,10 +109,13 @@ def compute_plan(
     stop_price: float,
     leverage: Optional[float] = None,
     tp_r_multiples: Optional[list[float]] = None,
-    maint_margin: float = DEFAULT_MAINT_MARGIN,
+    maint_margin: Optional[float] = None,
     fee_bps: int = DEFAULT_FEE_BPS,
     funding_pct_8h: float = DEFAULT_FUNDING_PCT_8H,
+    funding_pct_8h_next: Optional[float] = None,
     hold_hours: float = DEFAULT_HOLD_HOURS,
+    venue: Optional[str] = None,
+    symbol: Optional[str] = None,
 ) -> PositionPlan:
     if account_usd <= 0:
         raise ValueError("account_usd must be positive")
@@ -118,7 +125,7 @@ def compute_plan(
         raise ValueError("prices must be positive")
     if entry_price == stop_price:
         raise ValueError("entry_price and stop_price cannot be equal")
-    if maint_margin < 0 or maint_margin >= 1:
+    if maint_margin is not None and (maint_margin < 0 or maint_margin >= 1):
         raise ValueError("maint_margin must be in [0, 1)")
     if hold_hours < 0:
         raise ValueError("hold_hours must be non-negative")
@@ -140,11 +147,28 @@ def compute_plan(
         leverage_used = float(leverage)
     margin_required = position_notional / leverage_used
 
-    # Liquidation (isolated-margin approximation, constant maint margin).
-    if side == "long":
-        liquidation_price = entry_price * (1 - 1 / leverage_used + maint_margin)
+    # Resolve the maintenance margin.
+    # Precedence: explicit --maint-margin > venue/symbol tier lookup > legacy default.
+    mmr_effective: float
+    mmr_source: str
+    if maint_margin is not None:
+        mmr_effective = maint_margin
+        mmr_source = f"explicit ({maint_margin:.4f})"
+    elif venue is not None or symbol is not None:
+        from memecheck.common.mmr_tiers import lookup_mmr_tier
+        tier = lookup_mmr_tier(venue, symbol, position_notional)
+        mmr_effective = tier.mmr
+        venue_label = (venue or "kraken-futures").lower()
+        mmr_source = f"{venue_label} tier (≤${tier.max_notional_usd:,.0f})"
     else:
-        liquidation_price = entry_price * (1 + 1 / leverage_used - maint_margin)
+        mmr_effective = DEFAULT_MAINT_MARGIN
+        mmr_source = "default 0.5%"
+
+    # Liquidation (isolated-margin approximation, tier-aware MMR).
+    if side == "long":
+        liquidation_price = entry_price * (1 - 1 / leverage_used + mmr_effective)
+    else:
+        liquidation_price = entry_price * (1 + 1 / leverage_used - mmr_effective)
     liquidation_price = max(liquidation_price, 0.0)
     liquidation_distance_pct = abs(entry_price - liquidation_price) / entry_price * 100.0
 
@@ -167,7 +191,18 @@ def compute_plan(
     # outflow, negative = inflow), so the sign must flip based on trade side:
     #   long:  cost = +rate * notional * cycles    (positive rate hurts long)
     #   short: cost = -rate * notional * cycles    (negative rate hurts short)
-    funding_signed = position_notional * (funding_pct_8h / 100.0) * funding_cycles
+    # If the venue publishes a predicted next-cycle rate, use that for cycle
+    # 1 and current for the rest. Gives a meaningfully better cost estimate
+    # than holding the current rate constant.
+    if funding_pct_8h_next is not None and funding_cycles >= 1:
+        first_cycle_rate = funding_pct_8h_next
+        remaining_cycles = funding_cycles - 1
+        funding_signed = position_notional * (
+            (first_cycle_rate / 100.0) * 1.0
+            + (funding_pct_8h / 100.0) * remaining_cycles
+        )
+    else:
+        funding_signed = position_notional * (funding_pct_8h / 100.0) * funding_cycles
     estimated_funding = funding_signed if side == "long" else -funding_signed
 
     # R-multiple TP scenarios.
@@ -191,8 +226,12 @@ def compute_plan(
         leverage_requested=leverage,
         fee_bps=fee_bps,
         funding_pct_8h=funding_pct_8h,
+        funding_pct_8h_next=funding_pct_8h_next,
         hold_hours=hold_hours,
-        maint_margin=maint_margin,
+        maint_margin=mmr_effective,
+        maint_margin_source=mmr_source,
+        venue=venue,
+        symbol=symbol,
         side=side,
         dollar_risk_usd=dollar_risk,
         sl_distance_pct=sl_distance_pct,
@@ -284,6 +323,10 @@ def format_plan(p: PositionPlan) -> str:
         f"({liq_sign}{p.liquidation_distance_pct:.2f}% from entry)"
     )
     lines.append(
+        f"  MMR used:           {p.maint_margin*100:.2f}%   "
+        f"({p.maint_margin_source})"
+    )
+    lines.append(
         f"  Stop / Liq ratio:   {p.sl_to_liq_ratio:.2f}   "
         f"(want ≤ 0.70 for safety)"
     )
@@ -298,9 +341,15 @@ def format_plan(p: PositionPlan) -> str:
         f"  Round-trip fee:     {_fmt_usd(p.round_trip_fee_usd)}   "
         f"({p.fee_bps} bps)"
     )
+    funding_extra = ""
+    if p.funding_pct_8h_next is not None:
+        funding_extra = (
+            f" (cycle-1 uses {p.funding_pct_8h_next:+.3f}% predicted, "
+            f"then {p.funding_pct_8h:+.3f}%)"
+        )
     lines.append(
         f"  Funding ({p.hold_hours:.0f}h hold):  {_fmt_usd(p.estimated_funding_usd)}   "
-        f"({p.funding_pct_8h:+.3f}% / 8h)"
+        f"({p.funding_pct_8h:+.3f}% / 8h){funding_extra}"
     )
     lines.append("")
     lines.append("=== R-MULTIPLE TAKE-PROFIT SCENARIOS ===")
@@ -340,8 +389,12 @@ def plan_to_dict(p: PositionPlan) -> dict[str, Any]:
             "leverage_requested": p.leverage_requested,
             "fee_bps": p.fee_bps,
             "funding_pct_8h": p.funding_pct_8h,
+            "funding_pct_8h_next": p.funding_pct_8h_next,
             "hold_hours": p.hold_hours,
             "maint_margin": p.maint_margin,
+            "maint_margin_source": p.maint_margin_source,
+            "venue": p.venue,
+            "symbol": p.symbol,
         },
         "side": p.side,
         "risk": {

@@ -146,8 +146,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="R-multiple TP target (repeatable; default 1, 2, 3)",
     )
     plan.add_argument(
-        "--maint-margin", type=float, default=0.005, dest="maint_margin",
-        help="maintenance margin ratio (default 0.005 = 0.5%%)",
+        "--maint-margin", type=float, default=None, dest="maint_margin",
+        help="maintenance margin ratio (overrides venue tier; defaults to "
+             "venue/symbol tier lookup, or 0.5%% if no venue is given)",
     )
     plan.add_argument(
         "--fee-bps", type=int, default=10, dest="fee_bps",
@@ -167,6 +168,12 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--hold-hours", type=float, default=24.0, dest="hold_hours",
         help="expected hold time in hours for funding cost (default 24)",
+    )
+    plan.add_argument(
+        "--venue", type=str, default=None,
+        help="CEX venue for tiered-MMR lookup "
+             "(kraken-futures, bybit, deribit). Affects liquidation "
+             "distance for large positions.",
     )
     plan.add_argument(
         "--json", dest="as_json", action="store_true",
@@ -447,10 +454,10 @@ def _run_calc(args: argparse.Namespace) -> int:
 def _resolve_funding(
     explicit_funding: Optional[float],
     symbol: Optional[str],
-) -> tuple[float, Optional[str], dict[str, Any]]:
+) -> tuple[float, Optional[float], Optional[str], dict[str, Any]]:
     """Resolve funding rate from --funding / --symbol with explicit precedence.
 
-    Returns (pct_per_8h, human_note, extra_dict_for_json).
+    Returns (pct_per_8h, pct_per_8h_predicted_or_None, human_note, extra_dict_for_json).
     """
     from memecheck.common.position import DEFAULT_FUNDING_PCT_8H
 
@@ -461,19 +468,26 @@ def _resolve_funding(
                 f"using --funding {explicit_funding:+.4f}% (override; "
                 f"--symbol {symbol.upper()} ignored)"
             )
-        return explicit_funding, note, {}
+        return explicit_funding, None, note, {}
 
     if symbol:
         from memecheck.common.funding import fetch_funding_rate
         result = fetch_funding_rate(symbol)
         if result is not None:
+            note = (
+                f"auto-fetched {result.symbol} funding from {result.source}: "
+                f"{result.rate_per_8h_pct:+.4f}% per 8h "
+                f"(mark ${result.mark_price})"
+            )
+            if result.rate_per_8h_pct_next is not None:
+                note += (
+                    f"; next-cycle predicted "
+                    f"{result.rate_per_8h_pct_next:+.4f}%"
+                )
             return (
                 result.rate_per_8h_pct,
-                (
-                    f"auto-fetched {result.symbol} funding from {result.source}: "
-                    f"{result.rate_per_8h_pct:+.4f}% per 8h "
-                    f"(mark ${result.mark_price})"
-                ),
+                result.rate_per_8h_pct_next,
+                note,
                 {
                     "symbol": result.symbol,
                     "source": result.source,
@@ -481,10 +495,12 @@ def _resolve_funding(
                     "raw_unit": result.raw_unit,
                     "mark_price": result.mark_price,
                     "perp_symbol": result.perp_symbol,
+                    "rate_per_8h_pct_next": result.rate_per_8h_pct_next,
                 },
             )
         return (
             DEFAULT_FUNDING_PCT_8H,
+            None,
             (
                 f"could not fetch funding for {symbol.upper()} "
                 f"(symbol not listed on Kraken Futures, or fetch failed); "
@@ -493,13 +509,13 @@ def _resolve_funding(
             {},
         )
 
-    return DEFAULT_FUNDING_PCT_8H, None, {}
+    return DEFAULT_FUNDING_PCT_8H, None, None, {}
 
 
 def _run_plan(args: argparse.Namespace) -> int:
     from memecheck.common.position import compute_plan, format_plan, plan_to_dict
 
-    funding_pct, funding_note, funding_extra = _resolve_funding(
+    funding_pct, funding_pct_next, funding_note, funding_extra = _resolve_funding(
         args.funding, args.symbol
     )
 
@@ -513,7 +529,10 @@ def _run_plan(args: argparse.Namespace) -> int:
         maint_margin=args.maint_margin,
         fee_bps=args.fee_bps,
         funding_pct_8h=funding_pct,
+        funding_pct_8h_next=funding_pct_next,
         hold_hours=args.hold_hours,
+        venue=args.venue,
+        symbol=args.symbol,
     )
 
     if args.as_json:
@@ -556,7 +575,7 @@ def _run_prep(args: argparse.Namespace) -> int:
     from memecheck.scanner.runner import run_token
 
     # ----- Step 1: compute plan (pure math) ------------------------------
-    funding_pct, funding_note, funding_extra = _resolve_funding(
+    funding_pct, funding_pct_next, funding_note, funding_extra = _resolve_funding(
         args.funding, args.symbol
     )
     plan = compute_plan(
@@ -566,7 +585,9 @@ def _run_prep(args: argparse.Namespace) -> int:
         stop_price=args.stop,
         leverage=args.leverage,
         funding_pct_8h=funding_pct,
+        funding_pct_8h_next=funding_pct_next,
         hold_hours=args.hold_hours,
+        symbol=args.symbol,
     )
 
     # ----- Step 2: run scan with buy_size = plan's notional --------------
@@ -857,6 +878,7 @@ def _run_cex_prep(args: argparse.Namespace) -> int:
 
     # Funding from the same ticker, normalised exactly as the funding module does.
     funding_pct = metrics.get("funding_per_8h_pct")
+    funding_pct_next = metrics.get("funding_per_8h_pct_predicted")
     if funding_pct is None:
         funding_pct = DEFAULT_FUNDING_PCT_8H
 
@@ -868,7 +890,10 @@ def _run_cex_prep(args: argparse.Namespace) -> int:
         stop_price=args.stop,
         leverage=args.leverage,
         funding_pct_8h=funding_pct,
+        funding_pct_8h_next=funding_pct_next,
         hold_hours=args.hold_hours,
+        venue="kraken-futures",
+        symbol=args.symbol,
     )
 
     is_hard_pass = verdict.startswith("HARD PASS")

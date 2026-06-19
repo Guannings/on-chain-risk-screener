@@ -218,6 +218,64 @@ def test_short_receives_positive_funding() -> None:
     assert s.net_pnl_usd > s.gross_pnl_usd
 
 
+def test_predicted_funding_used_for_first_cycle() -> None:
+    """When the venue publishes a next-cycle prediction, cycle 1 uses
+    the predicted rate and remaining cycles use the current rate.
+
+    Compare two long-side plans:
+      a) current=+0.10, predicted=None → all cycles at +0.10
+      b) current=+0.10, predicted=+0.30 → cycle 1 at +0.30, rest at +0.10
+
+    Plan (b) should have higher funding cost than (a).
+    """
+    a = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        funding_pct_8h=+0.10, funding_pct_8h_next=None, hold_hours=24, fee_bps=0,
+    )
+    b = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        funding_pct_8h=+0.10, funding_pct_8h_next=+0.30, hold_hours=24, fee_bps=0,
+    )
+    assert b.estimated_funding_usd > a.estimated_funding_usd
+
+
+def test_venue_tier_changes_liquidation_distance() -> None:
+    """At a large notional, a venue's tiered MMR (higher than 0.5%) should
+    pull the liquidation price closer to entry vs the constant default."""
+    # SL 0.05% → position notional ~$10k * 1% / 0.0005 = $200k.
+    # At Bybit BTC tier, that's still inside the lowest band.
+    # At a $50M-equivalent position, MMR escalates.
+    small = compute_plan(
+        account_usd=100_000, risk_pct=1.0, entry_price=100.0, stop_price=99.5,
+        leverage=10, venue="bybit", symbol="BTC",
+    )
+    huge = compute_plan(
+        account_usd=100_000_000, risk_pct=10.0, entry_price=100.0, stop_price=99.9,
+        leverage=10, venue="bybit", symbol="BTC",
+    )
+    # Bigger position must use higher MMR → closer liquidation distance.
+    assert huge.maint_margin > small.maint_margin
+    assert "bybit" in huge.maint_margin_source
+
+
+def test_unknown_venue_keeps_existing_behavior() -> None:
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        venue="not-a-real-venue",
+    )
+    # Unknown venue falls back to 0.5% — no crash.
+    assert p.maint_margin == 0.005
+
+
+def test_explicit_maint_margin_overrides_venue() -> None:
+    p = compute_plan(
+        account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,
+        maint_margin=0.02, venue="kraken-futures", symbol="ETH",
+    )
+    assert p.maint_margin == 0.02
+    assert "explicit" in p.maint_margin_source
+
+
 def test_custom_tp_multiples() -> None:
     p = compute_plan(
         account_usd=10_000, risk_pct=1.0, entry_price=100.0, stop_price=95.0,

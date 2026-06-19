@@ -113,6 +113,39 @@ def _analyze_exit_liquidity(
             f"displayed (above {EXIT_SLIPPAGE_FLAG_PCT:.0f}% threshold)."
         )
 
+    # Realistic multi-pool estimate via Jupiter for Solana tokens.
+    if (primary.get("chainId") or "").lower() == "solana":
+        from memecheck.common.jupiter import estimate_realistic_buy_for_solana
+        base_mint = (primary.get("baseToken") or {}).get("address")
+        quote_mint = (primary.get("quoteToken") or {}).get("address")
+        if base_mint and quote_mint:
+            jq = estimate_realistic_buy_for_solana(
+                base_mint=str(base_mint),
+                quote_mint=str(quote_mint),
+                buy_size_usd=buy_size_usd,
+                quote_price_usd=qp_usd,
+            )
+            if jq is not None:
+                metrics["jupiter_price_impact_pct"] = jq.price_impact_pct
+                metrics["jupiter_route_hops"] = jq.route_hops
+                metrics["jupiter_out_amount_atomic"] = jq.out_amount
+                notes.append(
+                    f"  Realistic (Jupiter, {jq.route_hops}-hop route): "
+                    f"price impact {jq.price_impact_pct:+.2f}%  "
+                    f"(vs {impact:+.2f}% V2 single-pool estimate)"
+                )
+                # If the V2 estimate fired a flag but Jupiter says impact
+                # is actually small, soften with a note.
+                if impact >= EXIT_SLIPPAGE_FLAG_PCT and jq.price_impact_pct < EXIT_SLIPPAGE_FLAG_PCT:
+                    notes.append(
+                        "  → Single-pool flag may be conservative; Jupiter "
+                        "would route around the thin pool."
+                    )
+            else:
+                notes.append(
+                    "  Realistic (Jupiter): quote unavailable; V2 estimate only."
+                )
+
     return flags, notes, metrics
 
 
