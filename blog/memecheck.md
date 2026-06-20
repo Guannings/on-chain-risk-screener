@@ -1,61 +1,71 @@
-# What I learned building a crypto risk screener as a finance student
+# Building memecheck, a crypto risk screener I wrote because I lost ten bucks
 
-**By PARVAUX · June 2026**
+**PARVAUX · June 2026**
 
-This started with a $10 loss. Six thousand percent green candle, illiquid as concrete, no way out — the canonical first-trade memecoin experience. The tools to catch it existed; I just had to open four browser tabs to use them. So I wrote a single CLI that runs every check that would have stopped that trade. Then I generalized to CEX perpetuals, position sizing, real-time monitoring, on-chain decoding, and a deployer-history scorer. About six months later, the project is `memecheck` on PyPI: a zero-dependency Python tool with 269 tests and 42 source files. This post is what I learned along the way, because the writing the system taught me more than any class did.
+Earlier this month I bought a Solana memecoin that had surged six thousand percent in maybe half an hour. I put in ten dollars. When I tried to sell, the slippage was so bad the swap basically wouldn't go through. The pool had something like ten dollars of real liquidity. I'd lost the trade before I made it and I made it anyway. The coin is still in my Phantom wallet because I can't even sell it.
 
-## What memecheck actually does
+I'm a Public Finance and Economics double major at NCCU, so I had no business buying any memecoin, but I also had no business being so casual about checking. The tools to catch this trade existed. RugCheck would have told me about the holder concentration. DexScreener would have told me about the depth. A sober look at the price action would have told me about everything. I had four browser tabs open and I didn't read any of them, because four tabs is more friction than I had patience for.
 
-Two halves under one binary. **DEX side**: `scan <token_address>` returns a HARD PASS / RISKY / OK verdict by composing five checks — DexScreener market structure, RugCheck contract authority (Solana), honeypot.is sell-simulation (EVM), an on-chain Raydium AMM v4 decoder for ground-truth reserves, and an optional deployer-history scorer that walks the mint's creator wallet and reports how many of their prior deployments are now dead. **CEX side**: `cex-check <symbol>` does the equivalent for Kraken Futures / Hyperliquid perpetuals — funding rate vs basis vs open interest, with severity classification.
+So the next weekend I wrote a single Python file, about 350 lines, called `memecheck.py`. It took a token address, called three APIs, and printed a verdict. I tried it on a few tokens and felt smarter about not buying them. That was the whole project for a week or two.
 
-A position planner sits in the middle: $N = R / d_{sl}$, R-multiple sizing with side-aware funding cost, tier-aware maintenance margin from published exchange schedules, predicted-funding-cycle awareness. Then composed workflows (`prep`, `cex-prep`) gate the planner output on the screen verdict, so the calculator literally refuses to size a position that the scan classified as a rug. Real-time monitors (`watch`, `cex-watch`) replay these checks every few seconds against the live pool / perp and dispatch alerts to console / Telegram / Discord / ntfy.
+The version of `memecheck` I'm describing now is a lot bigger than that, and was mostly built over the last couple of weeks. It's on PyPI, it has 269 tests, and it does substantially more than the original. Most of that work happened in collaboration with Claude. I want to say that up front because there's no point hiding it: a lot of the typing and the boilerplate isn't mine. The design decisions, threshold values, math derivations, and the parts of the architecture that I can defend on a whiteboard are mine. If you pick a file from the repo and ask why it's structured the way it is, that's what I owe you an answer for, and the README's Part 4 is my attempt at that answer in long form.
 
-## The math worth deriving from scratch
+This post is the short version. What I built, what I learned, what I'd say if you asked me about it in an interview.
 
-I shipped without understanding the underlying math, then circled back and forced myself to derive each piece on paper. The four that mattered:
+## What it actually does
 
-**Constant-product AMM impact.** Given a Uniswap v2-style pool with reserves $R_{in}$ and $R_{out}$ and a swap of $A_{in}$ tokens (after fee $f$), the output is:
+There's a DEX side and a CEX side, both reached from one CLI. `scan <token_address>` is the pre-trade check: it pulls market data from DexScreener (or GeckoTerminal if DS is having a bad day), contract data from RugCheck on Solana or honeypot.is on EVM, decodes the Raydium AMM v4 pool state directly from Solana RPC for ground-truth reserves, and optionally walks the deployer's wallet to count how many of their previous mints are now dead. It composes all of that into one of three verdicts: HARD PASS, RISKY, or OK.
 
-$$A_{out} = \frac{R_{out} \cdot A_{in} (1 - f)}{R_{in} + A_{in} (1 - f)}$$
+`cex-check <SYMBOL>` is the equivalent for perpetuals. Kraken Futures and Hyperliquid funding rates (Deribit and BitMEX as fallbacks), basis vs mark price, open interest deltas. Same severity ladder.
 
-That single formula generates everything `scan --buy-size` reports: effective fill price, immediate round-trip loss (bounded by $\sim 2f$ on V2), and the max-safe-buy at a target price impact. Concentrated-liquidity pools (Uniswap v3, Orca Whirlpool) break this formula at tick crossings — memecheck handles that by delegating to Jupiter's quote API on Solana, which routes across pools and ticks for a realistic impact estimate alongside the conservative V2 single-pool number.
+A position planner sits in the middle of all this. Give it your account size, your stop, and your risk budget and it does R-multiple sizing with side-aware funding cost, tier-aware maintenance margin, and a take-profit table. Then `prep` and `cex-prep` are composed workflows that run the screen and the planner together, and refuse to print a position size if the screen verdict was HARD PASS.
 
-**R-multiple sizing.** Pick a fixed risk budget $R$ in dollars (e.g. $1\%$ of account). Position notional is $N = R / d_{sl}$ where $d_{sl}$ is fractional stop-loss distance. A 1R take-profit needs only $d_{sl}$ in your favor; 3R needs $3 d_{sl}$. Independent of leverage, independent of conviction, independent of vibes. This was the first thing my finance classes gestured at and the first thing the planner enforces.
+A real-time monitor (`watch`, `cex-watch`) replays these checks every few seconds and pings Telegram or Discord or ntfy if anything breaks.
 
-**Isolated-margin liquidation.** For a long at entry $P$ with leverage $L$ and maintenance margin $mm$:
+## Math worth deriving
 
-$$P_{liq}^{long} = P \left( 1 - \frac{1}{L} + mm \right)$$
+I shipped the first version without really understanding the formulas. Then I forced myself to derive each one, and the math was less intimidating than I thought.
 
-Symmetric for shorts. The "tier-aware" piece is that real exchanges don't use a constant $mm$ — they publish tiered schedules where MMR rises with position notional. A $5{,}000 position on Kraken uses $mm = 0.004$; a $5{,}000{,}000 position uses $mm = 0.05$. Ignoring tiers under-estimates liquidation distance by 5-10x at size. The `--venue` flag picks the right tier from published Kraken / Bybit / Deribit schedules.
+The constant-product AMM, given pool reserves $R_{in}$ and $R_{out}$ and a swap of $A_{in}$ tokens after fee $f$:
 
-**Side-aware funding.** Positive perp funding means longs pay shorts. So funding cost is signed: $+r \cdot N \cdot c$ for longs, $-r \cdot N \cdot c$ for shorts, where $c$ is hold-cycles. I shipped this wrong the first time and a live `cex-prep XRP` short produced a net P&L *higher* than gross — a free-money bug. The regression test now covers all four side × funding-sign combinations. Lesson: sign conventions deserve real tests, not vibe checks.
+$$A_{out} = \frac{R_{out} \cdot A_{in}(1-f)}{R_{in} + A_{in}(1-f)}$$
 
-## Architecture, in one sentence
+That's all the exit-liquidity simulator runs on. The effective fill price, the immediate round-trip loss (capped at roughly $2f$ on a Uniswap V2-style pool), and the max-safe-buy at a given target price impact all fall out of that formula and a binary search. For Solana the V2 estimate is intentionally pessimistic because Orca's Whirlpools and most Raydium CLMM pools are concentrated-liquidity, so the tool also calls Jupiter's quote API for a realistic multi-pool number and shows both side by side.
 
-Three input families (DEX sources, CEX perp sources, backtest tape, pure math) feed three shared engines (threshold analyzers, the Decider with windowed-delta semantics, the position planner) that emit to a common output bus (stdout, JSONL audit log, SQLite trade journal, env-gated alert dispatcher, exit codes). Every subcommand is a path through that graph. The clean separation means a new chain or venue is a 50-line adapter, not a fork.
+R-multiple sizing, where $R$ is a fixed dollar risk budget and $d_{sl}$ is the fractional stop-loss distance:
 
-The Decider rules: critical floor ($L_t/L_0 < 0.5$), large single event ($\Delta L_{10s} \leq -20\%$ debounced by 2), slow bleed ($\Delta L_{60s} \leq -10\%$ AND $\Delta L_{300s} \leq -15\%$ escalated after 6 ticks). Each one corresponds to a real-world rug pattern: atomic LP pull, large dump, slow distribution. The thresholds were hand-picked from DeFi norms initially — which brings us to the part I'm least proud of, and how I fixed it.
+$$N = \frac{R}{d_{sl}}$$
 
-## The hardest critique: "Did you measure it?"
+Position notional. Independent of leverage, independent of conviction. The thing finance classes gesture at without enforcing, and the thing the planner refuses to violate.
 
-For the first five months, the honest answer to "do your thresholds work?" was "they feel right based on DeFi research norms." That's not validation. So I built a corpus pipeline: `scripts/build_corpus.py` auto-detects historical rug events from GeckoTerminal's free OHLCV endpoint (no API key) by matching the on-chain shape — sustained peak, ≥80% drawdown, no recovery — and writes per-event tape and label CSVs in the format the backtest harness already consumes. `memecheck sweep` then grids over the decision-rule thresholds and reports precision, recall, F1 across the corpus.
+Isolated-margin liquidation on a long at entry $P$ with leverage $L$ and maintenance margin $mm$:
 
-The starter corpus I built this weekend is N=4 events scanned live across three chains: SOLANGELES (Solana, $-80.7\%$), ASTEROID (Ethereum, $-80.3\%$), DOGEUS (Ethereum, $-85.0\%$), ODIC (BSC, $-85.4\%$). Across the entire shipped threshold grid: **100% event-level recall**. Tick-level precision is about $0.2\%$, but that's a repeated-firing artifact — the rules continue to fire every tick after a threshold is crossed, so a single rug contributes hundreds of "predictions." The right framing is "given a labelled rug, do the rules fire at least once within the 60-second detection tolerance?" Yes, 4 of 4 here.
+$$P_{liq}^{long} = P\left(1 - \frac{1}{L} + mm\right)$$
 
-N=4 is small. The honest path to N=200 is paid data ($15/mo Bitquery, free tier on The Graph for EVM) or live forward monitoring across many tokens for weeks. The harness consumes the same CSV format either way, so growing the corpus is mechanical, not architectural.
+The piece I got wrong the first time was treating $mm$ as a constant. Real exchanges publish tiered schedules where the maintenance margin rises with position notional. Kraken Futures at five thousand dollars is at 0.4%, at five million dollars it's at 5%. Ignoring tiers underestimates liquidation distance by something like ten times at size. The `--venue` flag picks the right tier from Kraken's, Bybit's, and Deribit's published schedules. None of this matters at retail scale, but it was a useful exercise.
 
-## What I'd own up to in an interview
+Funding cost on a perp is signed. Positive funding means longs pay shorts. I wrote it the wrong way the first time, ignored the side: cost = $r \cdot N \cdot c$ where $c$ is hold cycles, regardless of long or short. The right version flips the sign: $+r$ for longs, $-r$ for shorts. I noticed because a `cex-prep XRP` short produced a net P&L *higher* than gross. Free money is the universal sign-error indicator. There's a regression test now covering all four side × funding-sign combinations.
 
-The synthetic-tape backtest in early versions only proved rules don't fire on noise. The real-data N=4 sweep is better but small. Threshold values are still hand-set, not learned from the corpus — I built the sweep infrastructure but haven't run a full Pareto optimization on labelled data yet. The exit-liquidity simulator is V2-only on EVM (Jupiter handles Solana); concentrated-liquidity math on Uniswap v3 isn't directly implemented. The watch monitor polls REST every 5-30 seconds rather than using sub-second websockets for most data (the Hyperliquid WS source is the exception, built on a hand-rolled stdlib RFC 6455 client because the project has a zero-dependency promise). And the tool is AI-assisted authorship — I want to be straightforward about that in a way that doesn't dodge it: the design decisions, threshold values, math validations, and the parts of the architecture that survive critical review are mine; the typing and the boilerplate aren't. If you pick a file from this repo and ask why it's structured the way it is, that's the right question to ask, and answering it is how I demonstrate ownership.
+## Architecture in one paragraph
 
-## What building this taught me
+Three things produce events in this system: DEX pools, CEX perps, and a backtest replay. They all flow into the same engine, which is a windowed state buffer plus a Decider with three rules. The rules are: a critical floor at $L_t/L_0 < 0.5$, a large single-tick event at $\Delta L_{10s} \leq -20\%$, and a slow bleed when $\Delta L_{60s} \leq -10\%$ and $\Delta L_{300s} \leq -15\%$ both hold. Output goes to stdout, a JSONL audit log, a SQLite trade journal, and an alert dispatcher with env-gated channels. Adding a new chain or venue is a fifty-line adapter, not a fork. The full thing is around 4500 lines of Python with zero runtime dependencies, which I'm slightly proud of.
 
-The most useful thing wasn't writing the code — it was discovering, after the fact, how much of finance is just careful sign conventions. The free-funding-for-shorts bug, the side-aware liquidation formula, the position-sizing math that doesn't reference leverage at all: each is "trivially obvious" until you write it down wrong once. Production trading systems are a lot of this — boring discipline about signs, units, and edge cases — wearing the costume of risk-adjusted return optimization. The Python is the easy part.
+## Did you measure it
 
-The second thing was learning to value a tool that prevents losses you can't see. Most of memecheck's value, if I'm using it correctly, looks like decisions I didn't make — pools I didn't buy, positions I didn't size up, perps I avoided around funding flips. There's no notification when a defensive tool works. That's a hard product category to feel rewarded by. Building something useful and unmeasurable was, I think, a more honest finance education than any model-portfolio exercise I've done in school.
+For most of the build, my answer to "do your thresholds actually work" was that I picked them from DeFi research norms and they seemed reasonable. Which isn't an answer, it's a vibe. So I built a corpus pipeline that scrapes GeckoTerminal's OHLCV endpoint, auto-detects rug-shaped events (sustained peak, eighty-percent-plus drawdown, no recovery), and writes them out in the format the backtest harness already consumes. Then `memecheck sweep` grids over the rule thresholds and reports precision and recall.
 
-If you want to look at the code: `pip install memecheck`, or [github.com/Guannings/on-chain-risk-screener](https://github.com/Guannings/on-chain-risk-screener). The CHANGELOG walks through what got built when. The README is roughly four parts: how to use it on DEX, how to use it on CEX, the math the planner does, and a "what's actually under the hood" tour of the engineering decisions. The full self-review of weakspots and how I closed them is also there. I'd rather you read the README cold than be pitched on it.
+The corpus I built this weekend is small. Four real events: SOLANGELES on Solana, ASTEROID and DOGEUS on Ethereum, ODIC on BSC, all between eighty and eighty-five percent peak-to-trough drops. Across every combination of thresholds I tried, the rules caught all four. Hundred percent recall on a corpus of four. Precision at the tick level is around 0.2%, but that's because the rules continue firing every tick after a threshold is crossed, so a single rug event contributes thousands of "predictions." At the event level, four out of four.
 
----
+Four is not a publishable N. The path to a real corpus is either fifteen dollars a month for Bitquery or a multi-week forward-monitoring run across hundreds of new launches. The harness consumes the same CSV format either way. Building bigger is mechanical, not architectural.
 
-*PARVAUX is a Public Finance and Economics double major at National Chengchi University, Taipei. Find more at [github.com/Guannings](https://github.com/Guannings).*
+## Things I'd own up to
+
+The synthetic tapes that shipped before the real corpus only proved the rules don't fire on noise. The real-data sweep is better, but it's N=4. Threshold values are still hand-set instead of optimized against labels. The exit simulator's V2 math is wrong for concentrated-liquidity pools, which I cover on Solana via Jupiter but not on EVM. The real-time monitor polls REST every few seconds instead of subscribing to websockets for most data, with one exception, the Hyperliquid stream, where I wrote an RFC 6455 client from scratch on top of `socket` and `ssl` to stay within the zero-dependency promise. And I haven't actually used the tool in real trading. I should, before I claim the journal is useful.
+
+## What it taught me
+
+The thing that surprised me wasn't anything about Python. It was how much of finance is sign conventions. The funding-cost bug, the side-aware liquidation formula, the position sizing that turns out not to reference leverage at all — each one is obvious right until you write it wrong once. Production trading code is, I think, a lot of this. Boring discipline about signs and units and edge cases, dressed up in risk-adjusted return language. The math part is easier than the bookkeeping.
+
+The other thing I learned is to respect tools whose value you can't see. If I'm using memecheck the way it's meant to be used, most of what it does looks like decisions I didn't make. Pools I didn't buy. Sizes I didn't pick. There's no notification when a defensive tool works, which makes them hard to be motivated by, and I think that's why most retail traders don't have them. I started this because of ten dollars. I kept going on it because I wanted to understand how the prevention worked, not because I was getting any reward from it.
+
+The repo is at [github.com/Guannings/on-chain-risk-screener](https://github.com/Guannings/on-chain-risk-screener) if you want to read the actual code. `pip install memecheck` if you want to run it. The README is long and the CHANGELOG is detailed; I'd start with the README's Part 4, which is the engineering tour, if you have ten minutes.
