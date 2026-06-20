@@ -4,6 +4,27 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.7.2 — 2026-06-20
+
+Documentation + portfolio pass. Adds `blog/memecheck.md` — a 1521-word
+post written for finance students and engineering recruiters covering
+origin, math derivations (constant-product AMM, R-multiples,
+liquidation, side-aware funding), architecture, measured corpus
+results, honest weakspots, and what building this taught.
+
+The blog post is the portfolio artifact for the project — what a
+recruiter actually reads. The repo is what they explore after.
+
+### Added
+- `blog/memecheck.md` — long-form post describing the project's
+  design, math, and validation status. Written to be read cold
+  without any prior context.
+
+### Not changed
+- No code changes. v0.7.1's pipeline + corpus + tests are unchanged.
+
+---
+
 ## v0.7.1 — 2026-06-20
 
 Validation-with-real-data pass. The biggest open question after the
