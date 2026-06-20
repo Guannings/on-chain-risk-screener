@@ -4,6 +4,52 @@ All notable changes to memecheck. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.7.1 — 2026-06-20
+
+Validation-with-real-data pass. The biggest open question after the
+v0.7 self-review closure was "do the thresholds actually work on real
+on-chain events?" This release answers that question with measured
+numbers from a live corpus.
+
+### Added — automated corpus builder (`memecheck/common/corpus.py` + `scripts/build_corpus.py`)
+- New module auto-detects historical rug events from GeckoTerminal's
+  free public OHLCV endpoint (no API key, no auth, rate-limit aware).
+- `detect_rug` is pure: given a pool's OHLCV, finds the peak →
+  collapse → no-recovery pattern. Two threshold modes:
+    - STRICT (default): close <5% of peak, max(post-rug 24h) <20%
+      of peak → pure rugs
+    - RELAXED (`--relaxed`): <20% / <50% → deep corrections too
+- `find_rug_candidates` scans multiple candidate universes (top
+  pools, trending pools, new pools) across pages with built-in
+  per-call throttling.
+- `write_tape` + `write_aggregated` produce CSVs in the format
+  `memecheck backtest` and `memecheck sweep` already consume.
+- New `--seed-addresses` flag accepts curated address lists for
+  higher-purity corpus building from public rug databases.
+
+### Measured — N=4 real on-chain rug corpus
+- Built a starter corpus from live GT data across Solana, Ethereum,
+  and BSC: SOLANGELES (Solana, −80.7%), ASTEROID (Ethereum,
+  −80.3%), DOGEUS (Ethereum, −85.0%), ODIC (BSC, −85.4%).
+- **Sweep result: 100% event-level recall across the entire shipped
+  threshold grid.** Every rug fires an ALERT or EXECUTE decision
+  within the 60-second tolerance window. Tick-level precision is
+  ~0.2% due to repeated-firing artifact (the rules keep firing once
+  threshold crossed), not real false positives.
+- Documented in README under new **Measured performance** section
+  with honest caveats: N=4 is starting point not final claim;
+  liquidity proxy is volume×close not reserve_in_usd; pattern
+  circularity acknowledged.
+
+### Fixed
+- mypy cleanup: typed `fetchers` dict in `find_rug_candidates`
+  explicitly so the dispatch passes strict type-check.
+
+### Tests
+269 passing (was 261). mypy clean across 42 source files.
+
+---
+
 ## v0.7.0 — 2026-06-19
 
 Self-review closure pass. All 17 items from the post-v0.5 self-review

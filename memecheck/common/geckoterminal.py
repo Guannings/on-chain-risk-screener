@@ -179,3 +179,74 @@ def fetch_geckoterminal(
         return converted[0], converted, None
 
     return None, [], last_err or "no pools on any GeckoTerminal network"
+
+
+# ----------------------------- OHLCV (historical) -----------------------
+
+
+def fetch_ohlcv(
+    chain_ds: str,
+    pool_address: str,
+    *,
+    timeframe: str = "hour",
+    aggregate: int = 1,
+    limit: int = 1000,
+    before_timestamp: Optional[int] = None,
+) -> Optional[list[list[float]]]:
+    """Fetch OHLCV from GeckoTerminal. Returns a list of
+    [unix_ts, open, high, low, close, volume] rows newest-first, or None.
+
+    Free public endpoint, no auth. `timeframe` is one of {minute, hour, day};
+    `aggregate` is the multiplier (e.g. timeframe=hour aggregate=4 → 4h candles).
+    `limit` capped at 1000 by GT.
+    """
+    gt_slug = CHAIN_DS_TO_GT.get(chain_ds.lower(), chain_ds.lower())
+    qs = f"aggregate={aggregate}&limit={limit}"
+    if before_timestamp is not None:
+        qs += f"&before_timestamp={before_timestamp}"
+    url = (
+        f"https://api.geckoterminal.com/api/v2/networks/{gt_slug}/pools/"
+        f"{pool_address}/ohlcv/{timeframe}?{qs}"
+    )
+    data = get_json(url, timeout=15)
+    if "_error" in data:
+        return None
+    rows = (data.get("data") or {}).get("attributes", {}).get("ohlcv_list")
+    if not rows:
+        return None
+    return rows
+
+
+def fetch_new_pools(chain_ds: str, page: int = 1) -> list[dict]:
+    """Newly-created pools on a chain. Each scan gets ~20 candidates per page;
+    GT serves up to page=10 (200 pools) before erroring."""
+    gt_slug = CHAIN_DS_TO_GT.get(chain_ds.lower(), chain_ds.lower())
+    url = f"https://api.geckoterminal.com/api/v2/networks/{gt_slug}/new_pools?page={page}"
+    data = get_json(url, timeout=15)
+    if "_error" in data:
+        return []
+    return data.get("data") or []
+
+
+def fetch_top_pools(chain_ds: str, page: int = 1) -> list[dict]:
+    """Top pools by 24h volume on a chain. Older pools with established
+    history — the right candidate universe when looking for past rugs."""
+    gt_slug = CHAIN_DS_TO_GT.get(chain_ds.lower(), chain_ds.lower())
+    url = f"https://api.geckoterminal.com/api/v2/networks/{gt_slug}/pools?page={page}"
+    data = get_json(url, timeout=15)
+    if "_error" in data:
+        return []
+    return data.get("data") or []
+
+
+def fetch_trending_pools(chain_ds: str, page: int = 1, duration: str = "24h") -> list[dict]:
+    """Trending pools — captures pump-and-dump candidates."""
+    gt_slug = CHAIN_DS_TO_GT.get(chain_ds.lower(), chain_ds.lower())
+    url = (
+        f"https://api.geckoterminal.com/api/v2/networks/{gt_slug}/"
+        f"trending_pools?page={page}&duration={duration}"
+    )
+    data = get_json(url, timeout=15)
+    if "_error" in data:
+        return []
+    return data.get("data") or []
